@@ -1,4 +1,4 @@
-// MyPhotoStorage-backend/server.js - 解決中文亂碼版本
+// MyPhotoStorage-backend/server.js - 最終中文檔名修復版本
 
 const express = require('express');
 const multer = require('multer');
@@ -30,17 +30,21 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         const fileBuffer = file.buffer;
         const contentBase64 = fileBuffer.toString('base64');
         
-        // ✨ 【修改點 1】 調整檔名處理，讓中文保留
-        const baseName = file.originalname.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
+        // ✨ ✨ 【最終中文檔名修復】 ✨ ✨ 
+        // 修正 Multer 在處理非 ASCII 檔名時可能發生的編碼錯誤
+        const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
+        
+        // 確保檔名只包含英數字、連字號、點和中文字，其他變成底線
+        const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
         const rawFileName = `${Date.now()}-${baseName}`; 
         const filePath = `images/${rawFileName}`; // 存放在 images 資料夾中
         
-        // ✨ 【修改點 2】 使用 encodeURIComponent 確保 API 網址中的中文路徑不會亂碼
+        // 使用 encodeURIComponent 確保 API 網址中的中文路徑不會亂碼
         const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
         
         try {
             const response = await axios.put(githubApiUrl, {
-                message: `feat: Batch upload photo ${file.originalname}`,
+                message: `feat: Batch upload photo ${originalnameFixed}`, // 使用修正後的檔名
                 content: contentBase64,
             }, {
                 headers: {
@@ -51,16 +55,16 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
             
             return {
                 status: 'success', 
-                fileName: file.originalname,
+                fileName: originalnameFixed, // 回傳修正後的檔名
                 url: response.data.content.download_url
             };
 
         } catch (error) {
             const errorMessage = error.response ? error.response.data.message : error.message;
-            console.error(`上傳 ${file.originalname} 失敗:`, errorMessage);
+            console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
             return {
                 status: 'error', 
-                fileName: file.originalname,
+                fileName: originalnameFixed,
                 error: errorMessage
             };
         }
