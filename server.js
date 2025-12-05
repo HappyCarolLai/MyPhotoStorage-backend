@@ -1,4 +1,4 @@
-// MyPhotoStorage-backend/server.js - 最終中文檔名修復版本
+// MyPhotoStorage-backend/server.js - 解決 SHA 衝突的最終版本
 
 const express = require('express');
 const multer = require('multer');
@@ -26,12 +26,14 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         return res.status(400).json({ error: '沒有收到照片檔案' });
     }
     
-    const uploadPromises = req.files.map(async (file) => {
+    // ✨ 關鍵修復：使用 for...of 迴圈確保檔案依序上傳，避免 GitHub SHA 衝突
+    const results = [];
+    
+    for (const file of req.files) {
         const fileBuffer = file.buffer;
         const contentBase64 = fileBuffer.toString('base64');
         
-        // ✨ ✨ 【最終中文檔名修復】 ✨ ✨ 
-        // 修正 Multer 在處理非 ASCII 檔名時可能發生的編碼錯誤
+        // 【中文檔名修復】 修正 Multer 在處理非 ASCII 檔名時可能發生的編碼錯誤
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
         
         // 確保檔名只包含英數字、連字號、點和中文字，其他變成底線
@@ -43,8 +45,9 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
         
         try {
+            // 由於在 for...of 迴圈中，await 會等待上一個檔案完成才繼續
             const response = await axios.put(githubApiUrl, {
-                message: `feat: Batch upload photo ${originalnameFixed}`, // 使用修正後的檔名
+                message: `feat: Batch upload photo ${originalnameFixed}`, 
                 content: contentBase64,
             }, {
                 headers: {
@@ -53,25 +56,24 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 },
             });
             
-            return {
+            results.push({
                 status: 'success', 
-                fileName: originalnameFixed, // 回傳修正後的檔名
+                fileName: originalnameFixed, 
                 url: response.data.content.download_url
-            };
+            });
 
         } catch (error) {
             const errorMessage = error.response ? error.response.data.message : error.message;
             console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
-            return {
+            results.push({
                 status: 'error', 
                 fileName: originalnameFixed,
-                error: errorMessage
-            };
+                // 只回傳簡潔的錯誤提示，避免用戶看到 SHA 亂碼
+                error: `上傳失敗，請稍後重試或檢查檔案大小。`
+            });
         }
-    });
+    } // 迴圈結束，所有檔案處理完成
 
-    const results = await Promise.all(uploadPromises);
-    
     return res.json({ 
         message: `批次上傳完成，總計 ${results.length} 個檔案。`,
         results: results
