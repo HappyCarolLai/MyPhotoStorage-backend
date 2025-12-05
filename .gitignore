@@ -1,0 +1,3 @@
+# Node.js 專案常見的忽略清單
+/node_modules
+.DS_Store
