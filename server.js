@@ -4,11 +4,11 @@ const express = require('express');
 const multer = require('multer');
 const axios = require('axios');
 const cors = require('cors'); 
-const mongoose = require('mongoose'); // MongoDB 連線工具
+const mongoose = require('mongoose'); 
 
 const app = express();
 app.use(cors()); 
-app.use(express.json()); // 讓 Express 可以解析 JSON 格式的請求
+app.use(express.json()); 
 
 const upload = multer({ storage: multer.memoryStorage() }); 
 
@@ -16,7 +16,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = process.env.REPO_OWNER;
 const REPO_NAME = process.env.REPO_NAME;
-const MONGODB_URL = process.env.MONGODB_URL; // MongoDB 連線字串
+const MONGODB_URL = process.env.MONGODB_URL; 
 
 if (!GITHUB_TOKEN || !REPO_OWNER || !REPO_NAME || !MONGODB_URL) {
     console.error("❌ 錯誤：必要的環境變數缺失 (GitHub 或 MongoDB)");
@@ -34,32 +34,65 @@ mongoose.connect(MONGODB_URL)
 
 // 定義照片資料模型
 const PhotoSchema = new mongoose.Schema({
-    originalFileName: { type: String, required: true }, // 原始檔名 (中文)
-    storageFileName: { type: String, required: true, unique: true }, // GitHub 上儲存的檔名 (包含時間戳)
-    githubUrl: { type: String, required: true }, // GitHub 圖片下載網址 (CDN 用)
-    albumId: { type: mongoose.Schema.Types.ObjectId, ref: 'Album' }, // 所屬相簿 ID
-    uploadedAt: { type: Date, default: Date.now } // 上傳時間
+    originalFileName: { type: String, required: true }, 
+    storageFileName: { type: String, required: true, unique: true }, 
+    githubUrl: { type: String, required: true }, 
+    albumId: { type: mongoose.Schema.Types.ObjectId, ref: 'Album' }, 
+    uploadedAt: { type: Date, default: Date.now } 
 });
 
 // 定義相簿資料模型
 const AlbumSchema = new mongoose.Schema({
-    name: { type: String, required: true, trim: true, unique: true }, // 相簿名稱
-    coverUrl: { type: String, default: '' }, // 相簿封面圖片網址
-    photoCount: { type: Number, default: 0 }, // 紀錄照片數量
-    createdAt: { type: Date, default: Date.now } // 創建時間
+    name: { type: String, required: true, trim: true, unique: true }, 
+    coverUrl: { type: String, default: '' }, 
+    photoCount: { type: Number, default: 0 }, 
+    createdAt: { type: Date, default: Date.now } 
 });
 
 const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
 // ----------------------------------------------------
-// 2. API 路由 - 相簿管理 (Albums)
+// 2. 輔助函式 (GitHub 相關)
 // ----------------------------------------------------
 
+/**
+ * 從 GitHub 刪除單個檔案
+ * @param {string} storageFileName - 儲存於 GitHub 的檔名 (含時間戳)
+ * @returns {Promise<void>}
+ */
+async function deleteFileFromGitHub(storageFileName) {
+    const filePath = `images/${storageFileName}`;
+    const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
+    
+    // 1. 取得檔案當前的 SHA
+    const fileInfoResponse = await axios.get(githubApiUrl, {
+        headers: { 'Authorization': `token ${GITHUB_TOKEN}` }
+    });
+    const sha = fileInfoResponse.data.sha;
+    
+    // 2. 從 GitHub 刪除檔案
+    await axios.delete(githubApiUrl, {
+        data: {
+            message: `chore: Delete photo ${storageFileName}`,
+            sha: sha 
+        },
+        headers: {
+            'Authorization': `token ${GITHUB_TOKEN}`,
+            'Content-Type': 'application/json',
+        },
+    });
+}
+
+
+// ----------------------------------------------------
+// 3. API 路由 - 相簿管理 (Albums)
+// ----------------------------------------------------
+
+// ... (GET/POST/PUT/DELETE /api/albums 不變) ...
 // [GET] 取得所有相簿列表
 app.get('/api/albums', async (req, res) => {
     try {
-        // 確保 '未分類相簿' 存在，如果不存在則創建
         let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
         if (!defaultAlbum) {
             defaultAlbum = new Album({ name: '未分類相簿' });
@@ -82,7 +115,6 @@ app.post('/api/albums', async (req, res) => {
             return res.status(400).json({ error: '相簿名稱不能為空' });
         }
         
-        // 檢查名稱是否重複
         const existingAlbum = await Album.findOne({ name });
         if (existingAlbum) {
              return res.status(409).json({ error: '相簿名稱已存在' });
@@ -105,7 +137,6 @@ app.put('/api/albums/:id', async (req, res) => {
             return res.status(400).json({ error: '相簿名稱不能為空' });
         }
         
-        // 避免重新命名為『未分類相簿』
         if (name === '未分類相簿') {
             return res.status(403).json({ error: '禁止將相簿名稱設定為「未分類相簿」' });
         }
@@ -152,7 +183,7 @@ app.delete('/api/albums/:id', async (req, res) => {
             { $set: { albumId: defaultAlbum._id } } 
         );
         
-        // 2. 更新預設相簿的照片計數 (原子操作)
+        // 2. 更新預設相簿的照片計數
         if (updateResult.modifiedCount > 0) {
             await Album.findByIdAndUpdate(defaultAlbum._id, { $inc: { photoCount: updateResult.modifiedCount } });
         }
@@ -170,14 +201,19 @@ app.delete('/api/albums/:id', async (req, res) => {
     }
 });
 
+
 // ----------------------------------------------------
-// 3. API 路由 - 照片管理 (Photos)
+// 4. API 路由 - 照片管理 (Photos)
 // ----------------------------------------------------
 
 // [GET] 取得特定相簿裡的所有照片
 app.get('/api/albums/:id/photos', async (req, res) => {
     try {
         const albumId = req.params.id;
+        // 確保相簿存在
+        if (!(await Album.findById(albumId))) {
+             return res.status(404).json({ error: '找不到該相簿' });
+        }
         const photos = await Photo.find({ albumId: albumId }).sort({ uploadedAt: -1 });
         res.json(photos);
     } catch (error) {
@@ -186,7 +222,7 @@ app.get('/api/albums/:id/photos', async (req, res) => {
     }
 });
 
-// [PUT] 修改特定照片的名稱
+// [PUT] 修改特定照片的名稱 (此功能在前端新分頁中未實作，但保留後端 API)
 app.put('/api/photos/:id', async (req, res) => {
     try {
         const { originalFileName } = req.body;
@@ -211,7 +247,7 @@ app.put('/api/photos/:id', async (req, res) => {
     }
 });
 
-// [PATCH] 移動特定照片到其他相簿 (相片移動)
+// [PATCH] 移動特定照片到其他相簿 (單張照片移動)
 app.patch('/api/photos/:id/move', async (req, res) => {
     try {
         const { targetAlbumId } = req.body;
@@ -221,32 +257,28 @@ app.patch('/api/photos/:id/move', async (req, res) => {
             return res.status(400).json({ error: '請提供目標相簿 ID' });
         }
         
-        // 1. 檢查目標相簿是否存在
         const targetAlbum = await Album.findById(targetAlbumId);
         if (!targetAlbum) {
             return res.status(404).json({ error: '找不到目標相簿' });
         }
         
-        // 2. 找到照片
         const photo = await Photo.findById(photoId);
         if (!photo) {
             return res.status(404).json({ error: '找不到該照片' });
         }
         
-        const oldAlbumId = photo.albumId; // 舊的相簿 ID
+        const oldAlbumId = photo.albumId; 
         
-        // 如果相簿相同，則不需移動
         if (oldAlbumId && oldAlbumId.toString() === targetAlbumId) {
             return res.status(200).json({ message: '照片已在目標相簿中', photo: photo });
         }
 
-        // 3. 執行更新
         photo.albumId = targetAlbumId;
         await photo.save();
 
-        // 4. 更新新舊相簿的照片計數 (原子操作)
-        await Album.findByIdAndUpdate(oldAlbumId, { $inc: { photoCount: -1 } }); // 舊相簿減 1
-        await Album.findByIdAndUpdate(targetAlbumId, { $inc: { photoCount: 1 } }); // 新相簿加 1
+        // 更新新舊相簿的照片計數
+        await Album.findByIdAndUpdate(oldAlbumId, { $inc: { photoCount: -1 } }); 
+        await Album.findByIdAndUpdate(targetAlbumId, { $inc: { photoCount: 1 } }); 
 
         res.json({ message: '照片已成功移動', photo: photo });
 
@@ -256,7 +288,7 @@ app.patch('/api/photos/:id/move', async (req, res) => {
     }
 });
 
-// [DELETE] 刪除單張照片 (需同步刪除 GitHub 檔案)
+// [DELETE] 刪除單張照片
 app.delete('/api/photos/:id', async (req, res) => {
     try {
         const photo = await Photo.findById(req.params.id);
@@ -264,31 +296,13 @@ app.delete('/api/photos/:id', async (req, res) => {
             return res.status(404).json({ error: '找不到該照片' });
         }
         
-        const filePath = `images/${photo.storageFileName}`;
-        const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
+        // 1. 從 GitHub 刪除檔案
+        await deleteFileFromGitHub(photo.storageFileName);
         
-        // 1. 取得檔案當前的 SHA
-        const fileInfoResponse = await axios.get(githubApiUrl, {
-            headers: { 'Authorization': `token ${GITHUB_TOKEN}` }
-        });
-        const sha = fileInfoResponse.data.sha;
-        
-        // 2. 從 GitHub 刪除檔案
-        await axios.delete(githubApiUrl, {
-            data: {
-                message: `chore: Delete photo ${photo.originalFileName}`,
-                sha: sha 
-            },
-            headers: {
-                'Authorization': `token ${GITHUB_TOKEN}`,
-                'Content-Type': 'application/json',
-            },
-        });
-        
-        // 3. 從 MongoDB 刪除記錄
+        // 2. 從 MongoDB 刪除記錄
         await Photo.findByIdAndDelete(req.params.id);
         
-        // 4. 更新相簿計數 (原子操作)
+        // 3. 更新相簿計數
         if (photo.albumId) {
             await Album.findByIdAndUpdate(photo.albumId, { $inc: { photoCount: -1 } });
         }
@@ -304,7 +318,147 @@ app.delete('/api/photos/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 4. API 路由 - 檔案上傳 (Upload)
+// 5. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
+// ----------------------------------------------------
+
+/**
+ * [POST] 批量刪除照片 (DELETE /api/photos/bulkDelete)
+ */
+app.post('/api/photos/bulkDelete', async (req, res) => {
+    const { photoIds } = req.body;
+    if (!photoIds || !Array.isArray(photoIds) || photoIds.length === 0) {
+        return res.status(400).json({ error: '請提供有效的照片 ID 列表進行批量刪除。' });
+    }
+
+    const successes = [];
+    const failures = [];
+    
+    // 找出所有需要刪除的照片
+    const photos = await Photo.find({ _id: { $in: photoIds } }).exec();
+    
+    // 處理所有刪除操作，使用 Promise.allSettled 確保單一失敗不會中斷整個批次
+    const deletionPromises = photos.map(async (photo) => {
+        try {
+            // 1. 執行 GitHub 刪除
+            await deleteFileFromGitHub(photo.storageFileName);
+
+            // 2. 刪除資料庫紀錄
+            await Photo.deleteOne({ _id: photo._id });
+            
+            // 3. 更新所屬相簿的照片數量
+            if (photo.albumId) {
+                // $inc: -1 是原子操作，可以安全地執行
+                await Album.findByIdAndUpdate(photo.albumId, { $inc: { photoCount: -1 } });
+            }
+
+            successes.push(photo._id);
+        } catch (error) {
+            console.error(`刪除照片 ${photo._id} 失敗:`, error.message);
+            failures.push({ 
+                _id: photo._id, 
+                error: error.message 
+            });
+        }
+    });
+
+    // 等待所有刪除操作完成
+    await Promise.allSettled(deletionPromises);
+
+    res.status(200).json({
+        message: `批量刪除完成。成功刪除 ${successes.length} 張，失敗 ${failures.length} 張。`,
+        successes,
+        failures
+    });
+});
+
+
+/**
+ * [POST] 批量移動照片 (POST /api/photos/bulkMove)
+ */
+app.post('/api/photos/bulkMove', async (req, res) => {
+    const { photoIds, targetAlbumId } = req.body;
+
+    if (!photoIds || !Array.isArray(photoIds) || photoIds.length === 0 || !targetAlbumId) {
+        return res.status(400).json({ error: '請提供有效的照片 ID 列表和目標相簿 ID。' });
+    }
+
+    // 檢查目標相簿是否存在
+    const targetAlbum = await Album.findById(targetAlbumId);
+    if (!targetAlbum) {
+        return res.status(404).json({ error: '找不到目標相簿。' });
+    }
+
+    const successes = [];
+    const failures = [];
+    
+    try {
+        // 1. 找出所有待移動照片的舊相簿 ID (用於扣減舊相簿的計數)
+        // 這裡需要確保 photoIds 都是有效的 ID
+        const photos = await Photo.find({ _id: { $in: photoIds } }).select('albumId');
+        if (photos.length === 0) {
+            return res.status(404).json({ error: '找不到任何指定的照片。' });
+        }
+        
+        // 2. 建立舊相簿計數變更地圖
+        const oldAlbumUpdates = new Map();
+        photos.forEach(photo => {
+            const oldId = photo.albumId ? photo.albumId.toString() : 'null'; // 處理 albumId 為 null 的情況
+            
+            // 避免將照片從 A 移動到 A，導致重複更新計數
+            if (oldId !== targetAlbumId.toString()) { 
+                 oldAlbumUpdates.set(oldId, (oldAlbumUpdates.get(oldId) || 0) + 1);
+            }
+        });
+
+        // 3. 在資料庫中執行批量更新操作 (將 albumId 設為新的 targetAlbumId)
+        const updateResult = await Photo.updateMany(
+            { _id: { $in: photoIds }, albumId: { $ne: targetAlbumId } }, // 排除已經在目標相簿中的照片
+            { $set: { albumId: targetAlbumId } }
+        );
+        
+        // 實際移動的照片數量 (成功寫入 DB 的數量)
+        const actualMovedCount = updateResult.modifiedCount;
+
+        if (updateResult.acknowledged) {
+            // 4. 更新舊相簿的 photoCount (進行扣減)
+            const decrementPromises = [];
+            for (const [oldAlbumId, count] of oldAlbumUpdates.entries()) {
+                if (oldAlbumId !== targetAlbumId.toString()) { // 再次確認，不從目標相簿中扣減
+                     decrementPromises.push(
+                        Album.findByIdAndUpdate(oldAlbumId, { $inc: { photoCount: -count } })
+                    );
+                }
+            }
+            await Promise.allSettled(decrementPromises);
+
+            // 5. 更新新相簿的 photoCount (進行增加)
+            if (actualMovedCount > 0) {
+                 await Album.findByIdAndUpdate(targetAlbumId, { $inc: { photoCount: actualMovedCount } });
+            }
+            
+            // 由於 updateMany 成功，所有 photoIds 都算成功
+            photos.forEach(p => successes.push(p._id));
+            
+        } else {
+            // 如果 updateMany 沒有確認成功，則視為失敗
+            photoIds.forEach(id => failures.push({ _id: id, error: '資料庫更新失敗' }));
+        }
+
+    } catch (error) {
+        console.error('批量移動照片失敗:', error);
+        photoIds.forEach(id => failures.push({ _id: id, error: error.message }));
+    }
+
+    res.status(200).json({
+        message: `批量移動完成。成功移動 ${successes.length} 張到「${targetAlbum.name}」。`,
+        successes,
+        failures
+    });
+});
+
+
+// ----------------------------------------------------
+// 6. API 路由 - 檔案上傳 (Upload) (不變)
 // ----------------------------------------------------
 
 // 檔案上傳 API
@@ -313,32 +467,27 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         return res.status(400).json({ error: '沒有收到照片檔案' });
     }
 
-    // ⭐ START: 修正邏輯 - 取得目標相簿 ID
-    const { targetAlbumId } = req.body; // 從前端 FormData 取得 ID
+    const { targetAlbumId } = req.body; 
     
-    // 確保「未分類相簿」存在 (作為備用)
     let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
     if (!defaultAlbum) {
         defaultAlbum = new Album({ name: '未分類相簿' });
         await defaultAlbum.save();
     }
     
-    let targetAlbum = defaultAlbum; // 預設目標為未分類相簿
+    let targetAlbum = defaultAlbum; 
     
-    // 如果前端傳送了目標 ID，則嘗試查找該相簿
     if (targetAlbumId) {
         const foundAlbum = await Album.findById(targetAlbumId);
         if (foundAlbum) {
-            targetAlbum = foundAlbum; // ⭐ 找到了，使用前端指定的相簿
+            targetAlbum = foundAlbum; 
         }
     }
-    // ⭐ END: 修正邏輯
     
     const results = [];
     let successCount = 0;
     
     for (const file of req.files) {
-        // 中文檔名修復 (保持不變)
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
         
         const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
@@ -348,7 +497,6 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
         
         try {
-            // 步驟 A: 上傳檔案到 GitHub (保持不變)
             await axios.put(githubApiUrl, {
                 message: `feat: Batch upload photo ${originalnameFixed}`, 
                 content: file.buffer.toString('base64'),
@@ -359,19 +507,17 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 },
             });
             
-            // GitHub Raw 圖片網址 (用於前端顯示)
             const githubDownloadUrl = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/${filePath}`;
 
-            // 步驟 B: 將照片資訊寫入 MongoDB
             const newPhoto = new Photo({
                 originalFileName: originalnameFixed,
                 storageFileName: rawFileName,
                 githubUrl: githubDownloadUrl,
-                albumId: targetAlbum._id // ⭐ 修正：使用動態確定的目標相簿 ID
+                albumId: targetAlbum._id 
             });
             await newPhoto.save();
             
-            successCount += 1; // 增加成功計數
+            successCount += 1; 
             results.push({
                 status: 'success', 
                 fileName: originalnameFixed, 
@@ -389,9 +535,7 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         }
     } 
 
-    // 步驟 C: 批次上傳完成後，統一更新目標相簿的照片計數 (原子操作)
     if (successCount > 0) {
-        // ⭐ 修正：更新 targetAlbum 的照片計數
         await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: successCount } });
     }
 
