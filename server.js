@@ -313,18 +313,32 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         return res.status(400).json({ error: '沒有收到照片檔案' });
     }
 
-    // 預設將照片上傳到 '未分類相簿' (如果不存在則創建)
+    // ⭐ START: 修正邏輯 - 取得目標相簿 ID
+    const { targetAlbumId } = req.body; // 從前端 FormData 取得 ID
+    
+    // 確保「未分類相簿」存在 (作為備用)
     let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
     if (!defaultAlbum) {
         defaultAlbum = new Album({ name: '未分類相簿' });
         await defaultAlbum.save();
     }
     
+    let targetAlbum = defaultAlbum; // 預設目標為未分類相簿
+    
+    // 如果前端傳送了目標 ID，則嘗試查找該相簿
+    if (targetAlbumId) {
+        const foundAlbum = await Album.findById(targetAlbumId);
+        if (foundAlbum) {
+            targetAlbum = foundAlbum; // ⭐ 找到了，使用前端指定的相簿
+        }
+    }
+    // ⭐ END: 修正邏輯
+    
     const results = [];
     let successCount = 0;
     
     for (const file of req.files) {
-        // 中文檔名修復
+        // 中文檔名修復 (保持不變)
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
         
         const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
@@ -334,7 +348,7 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
         
         try {
-            // 步驟 A: 上傳檔案到 GitHub
+            // 步驟 A: 上傳檔案到 GitHub (保持不變)
             await axios.put(githubApiUrl, {
                 message: `feat: Batch upload photo ${originalnameFixed}`, 
                 content: file.buffer.toString('base64'),
@@ -353,7 +367,7 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 originalFileName: originalnameFixed,
                 storageFileName: rawFileName,
                 githubUrl: githubDownloadUrl,
-                albumId: defaultAlbum._id 
+                albumId: targetAlbum._id // ⭐ 修正：使用動態確定的目標相簿 ID
             });
             await newPhoto.save();
             
@@ -375,9 +389,10 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         }
     } 
 
-    // 步驟 C: 批次上傳完成後，統一更新預設相簿的照片計數 (原子操作)
+    // 步驟 C: 批次上傳完成後，統一更新目標相簿的照片計數 (原子操作)
     if (successCount > 0) {
-        await Album.findByIdAndUpdate(defaultAlbum._id, { $inc: { photoCount: successCount } });
+        // ⭐ 修正：更新 targetAlbum 的照片計數
+        await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: successCount } });
     }
 
     return res.json({ 
