@@ -381,62 +381,6 @@ app.delete('/api/photos/:id', async (req, res) => {
     }
 });
 
-
-// ----------------------------------------------------
-// 5. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
-// ----------------------------------------------------
-
-/**
- * [POST] 批量刪除照片 (DELETE /api/photos/bulkDelete)
- */
-app.post('/api/photos/bulkDelete', async (req, res) => {
-    const { photoIds } = req.body;
-    if (!photoIds || !Array.isArray(photoIds) || photoIds.length === 0) {
-        return res.status(400).json({ error: '請提供有效的照片 ID 列表進行批量刪除。' });
-    }
-
-    const successes = [];
-    const failures = [];
-    
-    // 找出所有需要刪除的照片
-    const photos = await Photo.find({ _id: { $in: photoIds } }).exec();
-    
-    // 處理所有刪除操作，使用 Promise.allSettled 確保單一失敗不會中斷整個批次
-    const deletionPromises = photos.map(async (photo) => {
-        try {
-            // 1. 執行 GitHub 刪除
-            await deleteFileFromGitHub(photo.storageFileName);
-
-            // 2. 刪除資料庫紀錄
-            await Photo.deleteOne({ _id: photo._id });
-            
-            // 3. 更新所屬相簿的照片數量
-            if (photo.albumId) {
-                // $inc: -1 是原子操作，可以安全地執行
-                await Album.findByIdAndUpdate(photo.albumId, { $inc: { photoCount: -1 } });
-            }
-
-            successes.push(photo._id);
-        } catch (error) {
-            console.error(`刪除照片 ${photo._id} 失敗:`, error.message);
-            failures.push({ 
-                _id: photo._id, 
-                error: error.message 
-            });
-        }
-    });
-
-    // 等待所有刪除操作完成
-    await Promise.allSettled(deletionPromises);
-
-    res.status(200).json({
-        message: `批量刪除完成。成功刪除 ${successes.length} 張，失敗 ${failures.length} 張。`,
-        successes,
-        failures
-    });
-});
-
-
 /**
  * [POST] 批量移動照片 (POST /api/photos/bulkMove)
  */
