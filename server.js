@@ -182,7 +182,7 @@ app.delete('/api/albums/:id', async (req, res) => {
 // ----------------------------------------------------
 
 /**
- * [POST] 批量刪除照片 (POST /api/photos/bulkDelete) - 修正為循序執行
+ * [POST] 批量刪除照片 (DELETE /api/photos/bulkDelete) - 修正為循序執行
  */
 app.post('/api/photos/bulkDelete', async (req, res) => {
     const { photoIds } = req.body;
@@ -200,6 +200,7 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     for (const photo of photos) {
         try {
             // 1. 執行 GitHub 刪除 (會循序呼叫 deleteFileFromGitHub)
+            // 確保每次刪除完成後，下一個迴圈迭代才開始
             await deleteFileFromGitHub(photo.storageFileName);
 
             // 2. 刪除資料庫紀錄
