@@ -177,6 +177,79 @@ app.delete('/api/albums/:id', async (req, res) => {
             return res.status(500).json({ error: '系統錯誤：找不到預設相簿' });
         }
 
+        // [POST] 批量刪除照片 (需同步刪除 GitHub 檔案)
+app.post('/api/photos/bulkDelete', async (req, res) => {
+    try {
+        const { photoIds } = req.body; // 預期接收 ID 陣列
+
+        if (!photoIds || !Array.isArray(photoIds) || photoIds.length === 0) {
+            return res.status(400).json({ error: '請提供照片 ID 列表' });
+        }
+
+        let deletedCount = 0;
+        let updateAlbumCount = new Map(); // 追蹤每個相簿需要減少的照片數量
+
+        // 核心邏輯：逐一處理每個 ID
+        for (const id of photoIds) {
+            try {
+                const photo = await Photo.findById(id);
+                if (!photo) continue; 
+
+                const filePath = `images/${photo.storageFileName}`;
+                const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
+                
+                // 1. 取得檔案當前的 SHA
+                const fileInfoResponse = await axios.get(githubApiUrl, {
+                    headers: { 'Authorization': `token ${GITHUB_TOKEN}` }
+                });
+                const sha = fileInfoResponse.data.sha;
+                
+                // 2. 從 GitHub 刪除檔案
+                await axios.delete(githubApiUrl, {
+                    data: {
+                        message: `chore: Bulk delete photo ${photo.originalFileName}`,
+                        sha: sha 
+                    },
+                    headers: {
+                        'Authorization': `token ${GITHUB_TOKEN}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+                
+                // 3. 從 MongoDB 刪除記錄
+                await Photo.findByIdAndDelete(id);
+                
+                // 4. 準備更新相簿計數
+                if (photo.albumId) {
+                    const albumIdStr = photo.albumId.toString();
+                    updateAlbumCount.set(albumIdStr, (updateAlbumCount.get(albumIdStr) || 0) + 1);
+                }
+                
+                deletedCount++;
+
+            } catch (innerError) {
+                // 記錄單張刪除的錯誤，但不會中斷整個批次操作
+                console.error(`刪除照片 ID ${id} 失敗:`, innerError.message);
+            }
+        }
+        
+        // 5. 批次更新所有相關相簿的計數
+        for (const [albumId, count] of updateAlbumCount) {
+            await Album.findByIdAndUpdate(albumId, { $inc: { photoCount: -count } });
+        }
+
+        if (deletedCount === 0) {
+             return res.status(404).json({ error: '未成功刪除任何照片' });
+        }
+
+        res.json({ message: `成功刪除 ${deletedCount} 張照片。` });
+
+    } catch (error) {
+        console.error('批量刪除照片失敗:', error);
+        res.status(500).json({ error: `批量刪除失敗。錯誤訊息：${error.message}` });
+    }
+});
+
         // 1. 將該相簿下的所有照片轉移到 '未分類相簿'
         const updateResult = await Photo.updateMany(
             { albumId: albumId }, 
