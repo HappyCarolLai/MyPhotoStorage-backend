@@ -521,9 +521,9 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
 
         await s3Client.send(new PutObjectCommand(uploadParams));
         
-        // ⭐ 構造 R2 公開 URL
-        // 格式：R2_PUBLIC_URL/BUCKET_NAME/Key // ⭐ 修正點 3: 修正註解
-        const r2PublicUrl = `${R2_PUBLIC_URL}/${R2_BUCKET_NAME}/${fileKey}`;
+// ⭐ 構造 R2 公開 URL (修正：移除 R2_BUCKET_NAME)
+// 格式：R2_PUBLIC_URL/Key
+const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; // <--- 移除 R2_BUCKET_NAME
 
         const newPhoto = new Photo({
             originalFileName: originalnameFixed,
