@@ -1,8 +1,7 @@
-// MyPhotoStorage-backend/server.js - 批次相簿管理核心 (MongoDB & GitHub 整合)
+// MyPhotoStorage-backend/server.js - 批次相簿管理核心 (MongoDB & Cloudflare R2 整合)
 
 const express = require('express');
 const multer = require('multer');
-// const axios = require('axios'); // 移除 GitHub API 依賴
 const cors = require('cors'); 
 const mongoose = require('mongoose'); 
 // 引入 AWS S3 Client
@@ -14,16 +13,17 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() }); 
 
-// const GITHUB_TOKEN = process.env.GITHUB_TOKEN; const REPO_OWNER = process.env.REPO_OWNER; const REPO_NAME = process.env.REPO_NAME; const MONGODB_URL = process.env.MONGODB_URL; if (!GITHUB_TOKEN || !REPO_OWNER || !REPO_NAME || !MONGODB_URL) {     console.error("❌ 錯誤：必要的環境變數缺失 (GitHub 或 MongoDB)");    process.exit(1); } // 移除github環境變數
-
 // 取得環境變數 - Cloudflare R2 專用
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const R2_ENDPOINT = process.env.R2_ENDPOINT; // 管轄區域特定端點
+// ⭐ 修正點 1.1: 移除 R2_ENDPOINT，新增 R2_API_ENDPOINT 和 R2_PUBLIC_URL
+const R2_API_ENDPOINT = process.env.R2_API_ENDPOINT;     // S3 API 客戶端端點 (用於上傳/刪除)
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;       // 公用開發 URL (用於公開顯示)
 const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME; // 貯體名稱
 const MONGODB_URL = process.env.MONGODB_URL; 
 
-if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_ENDPOINT || !R2_BUCKET_NAME || !MONGODB_URL) {
+// ⭐ 修正點 1.2: 檢查所有 R2 變數 (R2_ENDPOINT 已移除)
+if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_API_ENDPOINT || !R2_PUBLIC_URL || !R2_BUCKET_NAME || !MONGODB_URL) {
     console.error("❌ 錯誤：必要的環境變數缺失 (R2 或 MongoDB)");
     process.exit(1); 
 }
@@ -35,7 +35,8 @@ if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_ENDPOINT || !R2_BUCKET_NAM
 // 實例化 S3 Client (用於連線 R2)
 const s3Client = new S3Client({
     region: 'auto', // R2 建議使用 'auto'
-    endpoint: R2_ENDPOINT,
+    // ⭐ 修正點 2: 使用 R2_API_ENDPOINT 進行 API 認證（修正打字錯誤）
+    endpoint: R2_API_ENDPOINT,
     credentials: {
         accessKeyId: R2_ACCESS_KEY_ID,
         secretAccessKey: R2_SECRET_ACCESS_KEY,
@@ -521,8 +522,8 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         await s3Client.send(new PutObjectCommand(uploadParams));
         
         // ⭐ 構造 R2 公開 URL
-        // 格式：R2_ENDPOINT/BUCKET_NAME/Key
-        const r2PublicUrl = `${R2_ENDPOINT}/${R2_BUCKET_NAME}/${fileKey}`;
+        // 格式：R2_PUBLIC_URL/BUCKET_NAME/Key // ⭐ 修正點 3: 修正註解
+        const r2PublicUrl = `${R2_PUBLIC_URL}/${R2_BUCKET_NAME}/${fileKey}`;
 
         const newPhoto = new Photo({
             originalFileName: originalnameFixed,
