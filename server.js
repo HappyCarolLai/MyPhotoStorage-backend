@@ -2,9 +2,11 @@
 
 const express = require('express');
 const multer = require('multer');
-const axios = require('axios');
+// const axios = require('axios'); // 移除 GitHub API 依賴
 const cors = require('cors'); 
 const mongoose = require('mongoose'); 
+// 引入 AWS S3 Client
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
 const app = express();
 app.use(cors()); 
@@ -12,16 +14,33 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() }); 
 
-// 取得環境變數
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const REPO_OWNER = process.env.REPO_OWNER;
-const REPO_NAME = process.env.REPO_NAME;
+// const GITHUB_TOKEN = process.env.GITHUB_TOKEN; const REPO_OWNER = process.env.REPO_OWNER; const REPO_NAME = process.env.REPO_NAME; const MONGODB_URL = process.env.MONGODB_URL; if (!GITHUB_TOKEN || !REPO_OWNER || !REPO_NAME || !MONGODB_URL) {     console.error("❌ 錯誤：必要的環境變數缺失 (GitHub 或 MongoDB)");    process.exit(1); } // 移除github環境變數
+
+// 取得環境變數 - Cloudflare R2 專用
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_ENDPOINT = process.env.R2_ENDPOINT; // 管轄區域特定端點
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME; // 貯體名稱
 const MONGODB_URL = process.env.MONGODB_URL; 
 
-if (!GITHUB_TOKEN || !REPO_OWNER || !REPO_NAME || !MONGODB_URL) {
-    console.error("❌ 錯誤：必要的環境變數缺失 (GitHub 或 MongoDB)");
+if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_ENDPOINT || !R2_BUCKET_NAME || !MONGODB_URL) {
+    console.error("❌ 錯誤：必要的環境變數缺失 (R2 或 MongoDB)");
     process.exit(1); 
 }
+
+// ----------------------------------------------------
+// 2. 輔助函式 (Cloudflare R2 相關) - 在此處新增 R2 Client 初始化
+// ----------------------------------------------------
+
+// 實例化 S3 Client (用於連線 R2)
+const s3Client = new S3Client({
+    region: 'auto', // R2 建議使用 'auto'
+    endpoint: R2_ENDPOINT,
+    credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+    }
+});
 
 // ----------------------------------------------------
 // 1. MongoDB 連線與資料模型 (Schema) 定義
@@ -53,35 +72,22 @@ const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
 // ----------------------------------------------------
-// 2. 輔助函式 (GitHub 相關)
+// 2. 輔助函式 (Cloudflare R2 相關) - 替換原 GitHub 函式
 // ----------------------------------------------------
 
 /**
- * 從 GitHub 刪除單個檔案
- * @param {string} storageFileName - 儲存於 GitHub 的檔名 (含時間戳)
+ * 從 R2 刪除單個檔案
+ * @param {string} storageFileName - 儲存於 R2 的檔名 (含時間戳)
  * @returns {Promise<void>}
  */
-async function deleteFileFromGitHub(storageFileName) {
-    const filePath = `images/${storageFileName}`;
-    const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
+async function deleteFileFromR2(storageFileName) { // <--- 函式名稱已變更
+    const params = {
+        Bucket: R2_BUCKET_NAME,
+        Key: `images/${storageFileName}`, // 保持與 GitHub 儲存路徑一致 (images/檔名)
+    };
     
-    // 1. 取得檔案當前的 SHA
-    const fileInfoResponse = await axios.get(githubApiUrl, {
-        headers: { 'Authorization': `token ${GITHUB_TOKEN}` }
-    });
-    const sha = fileInfoResponse.data.sha;
-    
-    // 2. 從 GitHub 刪除檔案
-    await axios.delete(githubApiUrl, {
-        data: {
-            message: `chore: Delete photo ${storageFileName}`,
-            sha: sha 
-        },
-        headers: {
-            'Authorization': `token ${GITHUB_TOKEN}`,
-            'Content-Type': 'application/json',
-        },
-    });
+    // 使用 DeleteObjectCommand 刪除檔案
+    await s3Client.send(new DeleteObjectCommand(params));
 }
 
 
@@ -295,8 +301,8 @@ app.delete('/api/photos/:id', async (req, res) => {
             return res.status(404).json({ error: '找不到該照片' });
         }
         
-        // 1. 從 GitHub 刪除檔案 (使用輔助函式)
-        await deleteFileFromGitHub(photo.storageFileName);
+// 1. 從 R2 刪除檔案 (使用輔助函式)
+        await deleteFileFromR2(photo.storageFileName); // <--- 替換為新的 R2 函式
         
         // 2. 從 MongoDB 刪除記錄
         await Photo.findByIdAndDelete(req.params.id);
@@ -308,8 +314,9 @@ app.delete('/api/photos/:id', async (req, res) => {
 
         res.json({ message: '照片已成功刪除' });
 
+// ...
     } catch (error) {
-        const errorMessage = error.response ? error.response.data.message : error.message;
+        const errorMessage = error.message; // ✅ 直接取 message
         console.error('刪除照片失敗:', errorMessage);
         res.status(500).json({ error: `無法刪除照片。錯誤訊息：${errorMessage}` });
     }
@@ -338,8 +345,8 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     // ⭐ 關鍵修正：使用 for...of 迴圈確保循序執行，避免 GitHub 409 衝突
     for (const photo of photos) {
         try {
-            // 1. 執行 GitHub 刪除 (會循序呼叫 deleteFileFromGitHub)
-            await deleteFileFromGitHub(photo.storageFileName);
+            // 1. 執行 R2 刪除
+            await deleteFileFromR2(photo.storageFileName); // ✅ 正確呼叫 R2 刪除函式
 
             // 2. 刪除資料庫紀錄
             await Photo.deleteOne({ _id: photo._id });
@@ -351,16 +358,13 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
 
             successes.push(photo._id);
         } catch (error) {
-            // 捕獲並記錄 GitHub 或資料庫錯誤
-            const status = error.response ? error.response.status : 'N/A';
-            const message = error.response && error.response.data ? error.response.data.message : error.message;
-            
-            const errorMessage = `GitHub API Error (${status}): ${message}`;
+// 捕獲並記錄 R2 或資料庫錯誤
+            const errorMessage = error.message; // 簡化 R2 錯誤訊息
             console.error(`刪除照片 ${photo._id} 失敗:`, errorMessage);
             
             failures.push({ 
                 _id: photo._id, 
-                error: errorMessage 
+                error: `R2 刪除失敗: ${errorMessage}` // 調整錯誤訊息
             });
         }
     }
@@ -501,47 +505,49 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         
         const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
         const rawFileName = `${Date.now()}-${baseName}`; 
-        const filePath = `images/${rawFileName}`; 
-        
-        const githubApiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${encodeURIComponent(filePath)}`;
-        
-        try {
-            await axios.put(githubApiUrl, {
-                message: `feat: Batch upload photo ${originalnameFixed}`, 
-                content: file.buffer.toString('base64'),
-            }, {
-                headers: {
-                    'Authorization': `token ${GITHUB_TOKEN}`,
-                    'Content-Type': 'application/json',
-                },
-            });
-            
-            const githubDownloadUrl = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/${filePath}`;
+// ... 變數設定
+    const fileKey = `images/${rawFileName}`; // 儲存到 R2 的 Key (S3 術語 Key 相當於檔案路徑)
+    
+    try {
+        // ⭐ 使用 S3 Client 進行 R2 上傳
+        const uploadParams = {
+            Bucket: R2_BUCKET_NAME,
+            Key: fileKey,
+            Body: file.buffer, // multer.memoryStorage() 產生的 Buffer 
+            ContentType: file.mimetype,
+            ACL: 'public-read' // 這是確保 R2 檔案可以公開存取的關鍵步驟
+        };
 
-            const newPhoto = new Photo({
-                originalFileName: originalnameFixed,
-                storageFileName: rawFileName,
-                githubUrl: githubDownloadUrl,
-                albumId: targetAlbum._id 
-            });
-            await newPhoto.save();
-            
-            successCount += 1; 
-            results.push({
-                status: 'success', 
-                fileName: originalnameFixed, 
-                url: githubDownloadUrl
-            });
+        await s3Client.send(new PutObjectCommand(uploadParams));
+        
+        // ⭐ 構造 R2 公開 URL
+        // 格式：R2_ENDPOINT/BUCKET_NAME/Key
+        const r2PublicUrl = `${R2_ENDPOINT}/${R2_BUCKET_NAME}/${fileKey}`;
 
-        } catch (error) {
-            const errorMessage = error.response ? error.response.data.message : error.message;
-            console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
-            results.push({
-                status: 'error', 
-                fileName: originalnameFixed,
-                error: `上傳失敗，請稍後重試或檢查檔案大小。`
-            });
-        }
+        const newPhoto = new Photo({
+            originalFileName: originalnameFixed,
+            storageFileName: rawFileName,
+            githubUrl: r2PublicUrl, // 雖然欄位名是 githubUrl，但已儲存 R2 URL
+            albumId: targetAlbum._id 
+        });
+        await newPhoto.save();
+        
+        successCount += 1; 
+        results.push({
+            status: 'success', 
+            fileName: originalnameFixed, 
+            url: r2PublicUrl
+        });
+
+    } catch (error) {
+        const errorMessage = error.message;
+        console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
+        results.push({
+            status: 'error', 
+            fileName: originalnameFixed,
+            error: `R2 上傳失敗，請檢查 API 金鑰或貯體名稱。錯誤：${errorMessage}`
+        });
+    }
     } 
 
     if (successCount > 0) {
