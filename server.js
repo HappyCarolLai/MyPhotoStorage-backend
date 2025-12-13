@@ -48,7 +48,7 @@ if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_API_ENDPOINT || !R2_PUBLIC
 }
 
 // ----------------------------------------------------
-// 2. 輔助函式 (Cloudflare R2 相關) - 在此處新增 R2 Client 初始化
+// 1. 輔助函式 (Cloudflare R2 相關) - 在此處新增 R2 Client 初始化
 // ----------------------------------------------------
 
 // 實例化 S3 Client (用於連線 R2)
@@ -63,7 +63,7 @@ const s3Client = new S3Client({
 });
 
 // ----------------------------------------------------
-// 1. MongoDB 連線與資料模型 (Schema) 定義
+// 2. MongoDB 連線與資料模型 (Schema) 定義
 // ----------------------------------------------------
 
 // 連線到 MongoDB
@@ -92,7 +92,7 @@ const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
 // ----------------------------------------------------
-// 2. 輔助函式 (Cloudflare R2 相關) - 替換原 GitHub 函式
+// 3. 輔助函式 (Cloudflare R2 相關) - 替換原 GitHub 函式
 // ----------------------------------------------------
 
 /**
@@ -110,11 +110,16 @@ async function deleteFileFromR2(storageFileName) { // <--- 函式名稱已變更
     await s3Client.send(new DeleteObjectCommand(params));
 }
 
-
 // ----------------------------------------------------
-// 3. API 路由 - 相簿管理 (Albums)
+// 4. API 路由 - 相簿管理 (Albums)
 // ----------------------------------------------------
-
+// 健康檢查 API
+app.get('/', (req, res) => {
+    res.status(200).json({ 
+        status: 'ok', 
+        message: 'MyPhotoStorage Backend Service is running and ready for API requests.'
+    });
+});
 // [GET] 取得所有相簿列表
 app.get('/api/albums', async (req, res) => {
     try {
@@ -228,7 +233,7 @@ app.delete('/api/albums/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 4. API 路由 - 照片管理 (Photos)
+// 5. API 路由 - 照片管理 (Photos)
 // ----------------------------------------------------
 
 // [GET] 取得特定相簿裡的所有照片
@@ -344,7 +349,7 @@ app.delete('/api/photos/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 5. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
+// 6. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
 // ----------------------------------------------------
 
 /**
@@ -491,7 +496,7 @@ app.post('/api/photos/bulkMove', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 6. API 路由 - 檔案上傳 (Upload) 
+// 7. API 路由 - 檔案上傳 (Upload) 
 // ----------------------------------------------------
 
 // 檔案上傳 API
