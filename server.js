@@ -1,6 +1,6 @@
 // MyPhotoStorage-backend/server.js - 批次相簿管理核心 (MongoDB & Cloudflare R2 整合)
 const mongoose = require('mongoose'); 
-// ⭐ 新增: 引入 path, os 和 fs
+// 新增: 引入 path, os 和 fs
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -9,12 +9,16 @@ const multer = require('multer');
 const cors = require('cors'); 
 // 引入 AWS S3 Client
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+// 新增: 引入 fluent-ffmpeg
+const ffmpeg = require('fluent-ffmpeg'); 
+// 引入 node:stream (用於將 ffmpeg 輸出導向 R2)
+const { PassThrough } = require('node:stream');
 
 const app = express();
 app.use(cors()); 
 app.use(express.json()); 
 
-// ⭐ 修正點 1: 使用 diskStorage 將檔案暫存到磁碟，避免記憶體溢出 (OOM)
+// 修正點 1: 使用 diskStorage 將檔案暫存到磁碟，避免記憶體溢出 (OOM)
 const upload = multer({ 
     storage: multer.diskStorage({
         destination: function (req, file, cb) {
@@ -27,8 +31,8 @@ const upload = multer({
         }
     }),
     limits: {
-        // ⭐ 修正點 2: 設定檔案大小上限為 100MB (可依需求調整)
-        fileSize: 100 * 1024 * 1024 // 100MB
+        // 修正點 2: 設定檔案大小上限為 500MB (可依需求調整)
+        fileSize: 500 * 1024 * 1024 // 500MB
     }
 }); 
 
@@ -63,7 +67,16 @@ const s3Client = new S3Client({
 });
 
 // ----------------------------------------------------
-// 2. MongoDB 連線與資料模型 (Schema) 定義
+// 2. FFmpeg 額外設定 (Zeabur 環境下可能不需要，但可保持相容性)
+// ----------------------------------------------------
+// 假設 FFmpeg 和 FFprobe 已經在 PATH 中 (由 install-ffmpeg.sh 完成)
+// 如果需要明確設定路徑，可以解除註解以下兩行：
+ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+ffmpeg.setFfprobePath('/usr/bin/ffprobe');
+
+
+// ----------------------------------------------------
+// 3. MongoDB 連線與資料模型 (Schema) 定義
 // ----------------------------------------------------
 
 // 連線到 MongoDB
@@ -92,7 +105,7 @@ const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
 // ----------------------------------------------------
-// 3. 輔助函式 (Cloudflare R2 相關) - 替換原 GitHub 函式
+// 4. 輔助函式 (Cloudflare R2 相關) - 替換原 GitHub 函式
 // ----------------------------------------------------
 
 /**
@@ -111,7 +124,95 @@ async function deleteFileFromR2(storageFileName) { // <--- 函式名稱已變更
 }
 
 // ----------------------------------------------------
-// 4. API 路由 - 相簿管理 (Albums)
+// 5. 輔助函式 - 影片/HEIC 處理 (使用 FFmpeg)
+// ----------------------------------------------------
+
+/**
+ * 使用 FFmpeg 處理媒體檔案 (壓縮影片/轉換 HEIC 到 JPEG)
+ * @param {object} file - Multer 暫存檔案物件
+ * @returns {Promise<{path: string, mime: string, ext: string}>} - 處理後的檔案路徑、MIME 類型和副檔名
+ */
+async function processMedia(file) {
+    const originalPath = file.path;
+    const originalMime = file.mimetype;
+    const originalExt = path.extname(file.originalname).toLowerCase();
+    
+    // 檢查是否為影片檔案 (常見格式)
+    if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
+        
+        const outputExt = '.mp4';
+        const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-compressed${outputExt}`);
+
+        console.log(`🎬 偵測到影片，開始壓縮到 ${outputPath}`);
+        
+        // 影片壓縮邏輯
+        await new Promise((resolve, reject) => {
+            ffmpeg(originalPath)
+                .outputOptions([
+                    // 使用 H.264 編碼器 (libx264)
+                    '-c:v libx264',
+                    // 適合網路串流的快速預設 (fast preset)
+                    '-preset fast',
+                    // 調整為中等畫質 (CRF 28-30 適用於壓縮，23-25 適用於高品質)
+                    '-crf 28', 
+                    // 保持音訊編碼 (aac)
+                    '-c:a aac',
+                    '-b:a 128k',
+                    // 確保輸出檔案可串流
+                    '-movflags frag_keyframe+empty_moov'
+                ])
+                .on('end', () => {
+                    console.log('✅ 影片壓縮完成');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('❌ FFmpeg 處理錯誤:', err.message);
+                    reject(new Error(`FFmpeg 處理失敗: ${err.message}`));
+                })
+                .save(outputPath);
+        });
+
+        // 返回壓縮後的檔案資訊
+        return { path: outputPath, mime: 'video/mp4', ext: outputExt };
+
+    } 
+    
+    // 檢查是否為 HEIC 格式 (iOS 照片常見格式)
+    else if (originalMime === 'image/heic' || originalMime === 'image/heif' || originalExt === '.heic' || originalExt === '.heif') {
+        
+        const outputExt = '.jpeg';
+        const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
+        
+        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG');
+
+        // HEIC/HEIF 轉換邏輯
+        await new Promise((resolve, reject) => {
+             ffmpeg(originalPath)
+                .outputOptions([
+                    '-q:v 2' // 品質設定 (2 是接近無損，數字越大壓縮越多)
+                ])
+                .on('end', () => {
+                    console.log('✅ HEIC 轉換為 JPEG 完成');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('❌ FFmpeg 處理錯誤:', err.message);
+                    reject(new Error(`FFmpeg 處理失敗: ${err.message}`));
+                })
+                .save(outputPath);
+        });
+        
+        // 返回轉換後的檔案資訊
+        return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
+        
+    }
+    
+    // 如果不是影片或 HEIC，則直接使用原始檔案
+    return { path: originalPath, mime: originalMime, ext: originalExt };
+}
+
+// ----------------------------------------------------
+// 6. API 路由 - 相簿管理 (Albums)
 // ----------------------------------------------------
 // 健康檢查 API
 app.get('/', (req, res) => {
@@ -233,7 +334,7 @@ app.delete('/api/albums/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 5. API 路由 - 照片管理 (Photos)
+// 7. API 路由 - 照片管理 (Photos)
 // ----------------------------------------------------
 
 // [GET] 取得特定相簿裡的所有照片
@@ -349,7 +450,7 @@ app.delete('/api/photos/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 6. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
+// 8. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
 // ----------------------------------------------------
 
 /**
@@ -496,7 +597,7 @@ app.post('/api/photos/bulkMove', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 7. API 路由 - 檔案上傳 (Upload) 
+// 9. API 路由 - 檔案上傳 (Upload) 
 // ----------------------------------------------------
 
 // 檔案上傳 API
@@ -526,42 +627,54 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
     let successCount = 0;
     
     for (const file of req.files) {
+        
+        // 原始檔案資訊
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
         const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
-        const rawFileName = `${Date.now()}-${baseName}`; 
-        const fileKey = `images/${rawFileName}`; // 儲存到 R2 的 Key (S3 術語 Key 相當於檔案路徑)
-        // ⭐ 預設使用的檔案路徑和檔名
-        let uploadFilePath = file.path;
-        let finalFileName = rawFileName;
-        
-        let fileStream; // 檔案串流變數
-        
+
+        // 追蹤所有需清理的路徑 (原始暫存檔和 FFmpeg 輸出檔)
+        const filesToCleanup = [file.path]; // 原始 multer 暫存路徑始終需清理
+
+        let processedMedia; // 處理後的媒體資訊
+
         try {
             // =======================================================
-            // 1. 讀取磁碟檔案串流
+            // 1. 處理媒體 (壓縮影片或轉換 HEIC/HEIF)
             // =======================================================
-            fileStream = fs.createReadStream(uploadFilePath); 
+            processedMedia = await processMedia(file);
             
-            // 2. 構造 R2 上傳參數
+            // 如果產生了新檔案 (壓縮/轉換)，將新檔案路徑加入清理清單
+            if (processedMedia.path !== file.path) {
+                filesToCleanup.push(processedMedia.path);
+            }
+            
+            // 2. 準備 R2 相關變數
+            const rawFileName = `${Date.now()}-${baseName.replace(path.extname(baseName), processedMedia.ext)}`; 
+            const fileKey = `images/${rawFileName}`; 
+            
+            // 3. 讀取處理後的磁碟檔案串流
+            const fileStream = fs.createReadStream(processedMedia.path); 
+            
+            // 4. 構造 R2 上傳參數
             const uploadParams = {
                 Bucket: R2_BUCKET_NAME,
                 Key: fileKey,
-                Body: fileStream, // <--- 關鍵：使用 fs.createReadStream 產生的串流
-                ContentLength: file.size, 
-                ContentType: file.mimetype,
+                Body: fileStream, 
+                // ⭐ 修正: ContentLength 應使用新的檔案大小 (但這裡我們省略，讓 S3/R2 自己計算)
+                // ⭐ 修正: ContentType 使用處理後的 MIME 類型
+                ContentType: processedMedia.mime, 
                 ACL: 'public-read' 
             };
             
-            // 3. 執行 R2 上傳
+            // 5. 執行 R2 上傳
             await s3Client.send(new PutObjectCommand(uploadParams));
             
-            // 4. 構造 R2 公開 URL
+            // 6. 構造 R2 公開 URL & 儲存 MongoDB 紀錄
             const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; 
 
-            // 5. 儲存 MongoDB 紀錄
             const newPhoto = new Photo({
                 originalFileName: originalnameFixed,
-                storageFileName: finalFileName,
+                storageFileName: rawFileName,
                 githubUrl: r2PublicUrl, 
                 albumId: targetAlbum._id 
             });
@@ -575,28 +688,25 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
             });
 
         } catch (error) {
-            // =======================================================
-            // 6. 錯誤處理
-            // =======================================================
+            // 7. 錯誤處理
             const errorMessage = error.message;
-            console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
+            console.error(`處理/上傳 ${originalnameFixed} 失敗:`, errorMessage);
             results.push({
                 status: 'error', 
                 fileName: originalnameFixed,
-                error: `R2 上傳或 DB 儲存失敗。錯誤：${errorMessage}`
+                error: `媒體處理或 R2 上傳失敗。錯誤：${errorMessage}`
             });
         } finally {
-            // =======================================================
-            // ⭐ 7. 關鍵清理步驟：無論成功或失敗，刪除磁碟暫存檔案
-            // =======================================================
-            try {
-                // 檢查檔案是否存在，以防被其他錯誤提前刪除
-                if (fs.existsSync(file.path)) {
-                    fs.unlinkSync(file.path);
-                    // 由於我們有可能在下一階段修改 file.path (壓縮後的路徑)，這裡使用 file.path 最安全
+            // ⭐ 8. 關鍵清理步驟：刪除所有磁碟暫存檔案 (原始檔和處理後的輸出檔)
+            for (const p of filesToCleanup) {
+                 try {
+                    if (fs.existsSync(p)) {
+                        fs.unlinkSync(p);
+                    }
+                } catch (cleanupError) {
+                    // 僅記錄清理失敗，不影響上傳成功與否
+                    console.error(`刪除暫存檔 ${p} 失敗:`, cleanupError.message);
                 }
-            } catch (cleanupError) {
-                console.error(`刪除暫存檔 ${file.path} 失敗:`, cleanupError.message);
             }
         }
     }
