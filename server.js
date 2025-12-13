@@ -4,11 +4,9 @@ const mongoose = require('mongoose'); 
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors'); 
-const mongoose = require('mongoose'); 
 // 引入 AWS S3 Client
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
