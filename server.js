@@ -1,4 +1,9 @@
 // MyPhotoStorage-backend/server.js - 批次相簿管理核心 (MongoDB & Cloudflare R2 整合)
+const mongoose = require('mongoose'); 
+// ⭐ 新增: 引入 path, os 和 fs
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
 
 const express = require('express');
 const multer = require('multer');
@@ -11,7 +16,23 @@ const app = express();
 app.use(cors()); 
 app.use(express.json()); 
 
-const upload = multer({ storage: multer.memoryStorage() }); 
+// ⭐ 修正點 1: 使用 diskStorage 將檔案暫存到磁碟，避免記憶體溢出 (OOM)
+const upload = multer({ 
+    storage: multer.diskStorage({
+        destination: function (req, file, cb) {
+            // 使用作業系統的暫存目錄
+            cb(null, os.tmpdir()); 
+        },
+        filename: function (req, file, cb) {
+            // 生成唯一的暫存檔名
+            cb(null, `${Date.now()}-${file.originalname.substring(0, 30)}`);
+        }
+    }),
+    limits: {
+        // ⭐ 修正點 2: 設定檔案大小上限為 100MB (可依需求調整)
+        fileSize: 100 * 1024 * 1024 // 100MB
+    }
+}); 
 
 // 取得環境變數 - Cloudflare R2 專用
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
@@ -503,53 +524,79 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
     
     for (const file of req.files) {
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
-        
         const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
         const rawFileName = `${Date.now()}-${baseName}`; 
-// ... 變數設定
-    const fileKey = `images/${rawFileName}`; // 儲存到 R2 的 Key (S3 術語 Key 相當於檔案路徑)
-    
-    try {
-        // ⭐ 使用 S3 Client 進行 R2 上傳
-        const uploadParams = {
-            Bucket: R2_BUCKET_NAME,
-            Key: fileKey,
-            Body: file.buffer, // multer.memoryStorage() 產生的 Buffer 
-            ContentType: file.mimetype,
-            ACL: 'public-read' // 這是確保 R2 檔案可以公開存取的關鍵步驟
-        };
-
-        await s3Client.send(new PutObjectCommand(uploadParams));
+        const fileKey = `images/${rawFileName}`; // 儲存到 R2 的 Key (S3 術語 Key 相當於檔案路徑)
+        // ⭐ 預設使用的檔案路徑和檔名
+        let uploadFilePath = file.path;
+        let finalFileName = rawFileName;
         
-// ⭐ 構造 R2 公開 URL (修正：移除 R2_BUCKET_NAME)
-// 格式：R2_PUBLIC_URL/Key
-const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; // <--- 移除 R2_BUCKET_NAME
-
-        const newPhoto = new Photo({
-            originalFileName: originalnameFixed,
-            storageFileName: rawFileName,
-            githubUrl: r2PublicUrl, // 雖然欄位名是 githubUrl，但已儲存 R2 URL
-            albumId: targetAlbum._id 
-        });
-        await newPhoto.save();
+        let fileStream; // 檔案串流變數
         
-        successCount += 1; 
-        results.push({
-            status: 'success', 
-            fileName: originalnameFixed, 
-            url: r2PublicUrl
-        });
+        try {
+            // =======================================================
+            // 1. 讀取磁碟檔案串流
+            // =======================================================
+            fileStream = fs.createReadStream(uploadFilePath); 
+            
+            // 2. 構造 R2 上傳參數
+            const uploadParams = {
+                Bucket: R2_BUCKET_NAME,
+                Key: fileKey,
+                Body: fileStream, // <--- 關鍵：使用 fs.createReadStream 產生的串流
+                ContentLength: file.size, 
+                ContentType: file.mimetype,
+                ACL: 'public-read' 
+            };
+            
+            // 3. 執行 R2 上傳
+            await s3Client.send(new PutObjectCommand(uploadParams));
+            
+            // 4. 構造 R2 公開 URL
+            const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; 
 
-    } catch (error) {
-        const errorMessage = error.message;
-        console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
-        results.push({
-            status: 'error', 
-            fileName: originalnameFixed,
-            error: `R2 上傳失敗，請檢查 API 金鑰或貯體名稱。錯誤：${errorMessage}`
-        });
+            // 5. 儲存 MongoDB 紀錄
+            const newPhoto = new Photo({
+                originalFileName: originalnameFixed,
+                storageFileName: finalFileName,
+                githubUrl: r2PublicUrl, 
+                albumId: targetAlbum._id 
+            });
+            await newPhoto.save();
+            
+            successCount += 1; 
+            results.push({
+                status: 'success', 
+                fileName: originalnameFixed, 
+                url: r2PublicUrl
+            });
+
+        } catch (error) {
+            // =======================================================
+            // 6. 錯誤處理
+            // =======================================================
+            const errorMessage = error.message;
+            console.error(`上傳 ${originalnameFixed} 失敗:`, errorMessage);
+            results.push({
+                status: 'error', 
+                fileName: originalnameFixed,
+                error: `R2 上傳或 DB 儲存失敗。錯誤：${errorMessage}`
+            });
+        } finally {
+            // =======================================================
+            // ⭐ 7. 關鍵清理步驟：無論成功或失敗，刪除磁碟暫存檔案
+            // =======================================================
+            try {
+                // 檢查檔案是否存在，以防被其他錯誤提前刪除
+                if (fs.existsSync(file.path)) {
+                    fs.unlinkSync(file.path);
+                    // 由於我們有可能在下一階段修改 file.path (壓縮後的路徑)，這裡使用 file.path 最安全
+                }
+            } catch (cleanupError) {
+                console.error(`刪除暫存檔 ${file.path} 失敗:`, cleanupError.message);
+            }
+        }
     }
-    } 
 
     if (successCount > 0) {
         await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: successCount } });
@@ -560,7 +607,6 @@ const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; // <--- 移除 R2_BUCKET_NAME
         results: results
     });
 });
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
