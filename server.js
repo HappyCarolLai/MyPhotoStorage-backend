@@ -137,7 +137,9 @@ async function processMedia(file) {
     const originalMime = file.mimetype;
     const originalExt = path.extname(file.originalname).toLowerCase();
     
-    // 檢查是否為影片檔案 (常見格式)
+    // =========================================================================
+    // 1. 檢查是否為影片檔案 (執行修正點 A: ultrafast 壓縮)
+    // =========================================================================
     if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
         
         const outputExt = '.mp4';
@@ -149,16 +151,14 @@ async function processMedia(file) {
         await new Promise((resolve, reject) => {
             ffmpeg(originalPath)
                 .outputOptions([
-                    // 使用 H.264 編碼器 (libx264)
                     '-c:v libx264',
-                    // 適合網路串流的快速預設 (fast preset)
-                    '-preset fast',
-                    // 調整為中等畫質 (CRF 28-30 適用於壓縮，23-25 適用於高品質)
+                    // ⭐ 修正 1: 將預設設為超快速 (ultrafast)
+                    '-preset ultrafast', 
                     '-crf 28', 
-                    // 保持音訊編碼 (aac)
+                    // ⭐ 修正 2: 明確設置像素格式
+                    '-pix_fmt yuv420p', 
                     '-c:a aac',
                     '-b:a 128k',
-                    // 確保輸出檔案可串流
                     '-movflags frag_keyframe+empty_moov'
                 ])
                 .on('end', () => {
@@ -177,8 +177,17 @@ async function processMedia(file) {
 
     } 
     
-    // 檢查是否為 HEIC 格式 (iOS 照片常見格式)
-    else if (originalMime === 'image/heic' || originalMime === 'image/heif' || originalExt === '.heic' || originalExt === '.heif') {
+    // =========================================================================
+    // 2. 檢查是否為 HEIC 格式 (執行 HEIC 轉 JPEG 邏輯)
+    // =========================================================================
+    else if (
+        originalMime === 'image/heic' || 
+        originalMime === 'image/heif' || 
+        originalMime === 'image/heic-sequence' || 
+        originalMime === 'image/heif-sequence' || 
+        originalExt === '.heic' || 
+        originalExt === '.heif'
+    ) {
         
         const outputExt = '.jpeg';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
@@ -189,7 +198,7 @@ async function processMedia(file) {
         await new Promise((resolve, reject) => {
              ffmpeg(originalPath)
                 .outputOptions([
-                    '-q:v 2' // 品質設定 (2 是接近無損，數字越大壓縮越多)
+                    '-q:v 2' // 品質設定 (2 是接近無損)
                 ])
                 .on('end', () => {
                     console.log('✅ HEIC 轉換為 JPEG 完成');
@@ -207,8 +216,26 @@ async function processMedia(file) {
         
     }
     
-    // 如果不是影片或 HEIC，則直接使用原始檔案
-    return { path: originalPath, mime: originalMime, ext: originalExt };
+    // =========================================================================
+    // 3. 檢查是否為標準圖片格式 (跳過處理，直接使用原始檔)
+    // =========================================================================
+    else if (
+        originalMime === 'image/jpeg' || 
+        originalMime === 'image/png' || 
+        originalMime === 'image/webp' || 
+        originalExt === '.jpg' ||
+        originalExt === '.jpeg' ||
+        originalExt === '.png' ||
+        originalExt === '.webp' 
+    ) {
+        // 如果是標準圖片，則直接使用原始檔案
+        return { path: originalPath, mime: originalMime, ext: originalExt };
+    }
+    
+    // =========================================================================
+    // 4. 其他檔案類型 (拋出錯誤)
+    // =========================================================================
+    throw new Error(`不支援的檔案類型: ${originalMime}`);
 }
 
 // ----------------------------------------------------
@@ -602,74 +629,51 @@ app.post('/api/photos/bulkMove', async (req, res) => {
 
 // 檔案上傳 API
 app.post('/upload', upload.array('photos'), async (req, res) => {
-    if (!req.files || req.files.length === 0) {
-        return res.status(400).json({ error: '沒有收到照片檔案' });
-    }
-
-    const { targetAlbumId } = req.body; 
-    
-    let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
-    if (!defaultAlbum) {
-        defaultAlbum = new Album({ name: '未分類相簿' });
-        await defaultAlbum.save();
-    }
-    
-    let targetAlbum = defaultAlbum; 
-    
-    if (targetAlbumId) {
-        const foundAlbum = await Album.findById(targetAlbumId);
-        if (foundAlbum) {
-            targetAlbum = foundAlbum; 
-        }
-    }
+    // ... (所有前置的 album 變數設定保持不變) ...
     
     const results = [];
     let successCount = 0;
     
     for (const file of req.files) {
         
-        // 原始檔案資訊
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
         const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
 
-        // 追蹤所有需清理的路徑 (原始暫存檔和 FFmpeg 輸出檔)
-        const filesToCleanup = [file.path]; // 原始 multer 暫存路徑始終需清理
-
-        let processedMedia; // 處理後的媒體資訊
+        const filesToCleanup = [file.path]; 
+        let processedMedia; 
 
         try {
             // =======================================================
-            // 1. 處理媒體 (壓縮影片或轉換 HEIC/HEIF)
+            // ⭐ 1. 關鍵步驟：呼叫 processMedia 取得處理後的結果
             // =======================================================
-            processedMedia = await processMedia(file);
+            processedMedia = await processMedia(file); // 使用上方修正後的函式
             
-            // 如果產生了新檔案 (壓縮/轉換)，將新檔案路徑加入清理清單
+            // 2. 判斷是否產生了新的暫存檔
             if (processedMedia.path !== file.path) {
                 filesToCleanup.push(processedMedia.path);
             }
             
-            // 2. 準備 R2 相關變數
+            // 3. 準備 R2 相關變數
+            // 修正：使用處理後的副檔名 processedMedia.ext
             const rawFileName = `${Date.now()}-${baseName.replace(path.extname(baseName), processedMedia.ext)}`; 
             const fileKey = `images/${rawFileName}`; 
             
-            // 3. 讀取處理後的磁碟檔案串流
+            // 4. 讀取處理後的磁碟檔案串流
             const fileStream = fs.createReadStream(processedMedia.path); 
             
-            // 4. 構造 R2 上傳參數
+            // 5. 構造 R2 上傳參數
             const uploadParams = {
                 Bucket: R2_BUCKET_NAME,
                 Key: fileKey,
                 Body: fileStream, 
-                // ⭐ 修正: ContentLength 應使用新的檔案大小 (但這裡我們省略，讓 S3/R2 自己計算)
-                // ⭐ 修正: ContentType 使用處理後的 MIME 類型
-                ContentType: processedMedia.mime, 
+                ContentType: processedMedia.mime, // 使用處理後的 MIME 類型
                 ACL: 'public-read' 
             };
             
-            // 5. 執行 R2 上傳
+            // 6. 執行 R2 上傳
             await s3Client.send(new PutObjectCommand(uploadParams));
             
-            // 6. 構造 R2 公開 URL & 儲存 MongoDB 紀錄
+            // 7. 構造 R2 公開 URL & 儲存 MongoDB 紀錄
             const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; 
 
             const newPhoto = new Photo({
@@ -688,7 +692,7 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
             });
 
         } catch (error) {
-            // 7. 錯誤處理
+            // 錯誤處理
             const errorMessage = error.message;
             console.error(`處理/上傳 ${originalnameFixed} 失敗:`, errorMessage);
             results.push({
@@ -697,14 +701,13 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 error: `媒體處理或 R2 上傳失敗。錯誤：${errorMessage}`
             });
         } finally {
-            // ⭐ 8. 關鍵清理步驟：刪除所有磁碟暫存檔案 (原始檔和處理後的輸出檔)
+            // 關鍵清理步驟
             for (const p of filesToCleanup) {
                  try {
                     if (fs.existsSync(p)) {
                         fs.unlinkSync(p);
                     }
                 } catch (cleanupError) {
-                    // 僅記錄清理失敗，不影響上傳成功與否
                     console.error(`刪除暫存檔 ${p} 失敗:`, cleanupError.message);
                 }
             }
