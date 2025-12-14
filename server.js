@@ -127,108 +127,15 @@ async function deleteFileFromR2(storageFileName) { // <--- 函式名稱已變更
 // 5. 輔助函式 - 影片/HEIC 處理 (使用 FFmpeg)
 // ----------------------------------------------------
 
-/**
- * 使用 FFmpeg 處理媒體檔案 (壓縮影片/轉換 HEIC 到 JPEG)
- * @param {object} file - Multer 暫存檔案物件
- * @returns {Promise<{path: string, mime: string, ext: string}>} - 處理後的檔案路徑、MIME 類型和副檔名
- */
 async function processMedia(file) {
     const originalPath = file.path;
     const originalMime = file.mimetype;
     const originalExt = path.extname(file.originalname).toLowerCase();
     
     // =========================================================================
-// 1. 檢查是否為影片檔案 (執行修正點 A: ultrafast 壓縮)
-// =========================================================================
-if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
-    
-    // ... (outputPath 設定不變) ...
-
-    console.log(`🎬 偵測到影片，開始壓縮到 ${outputPath}`);
-    
-    // 影片壓縮邏輯
-    await new Promise((resolve, reject) => {
-        ffmpeg(originalPath)
-            .outputOptions([
-                '-c:v libx264',
-                // ⭐ 修正 A: 將預設設定為速度最快的 `ultrafast` (已設定)
-                '-preset ultrafast', 
-                '-crf 28', 
-                '-pix_fmt yuv420p', 
-                '-c:a aac',
-                '-b:a 128k',
-                '-movflags frag_keyframe+empty_moov'
-            ])
-            // ⭐ 修正 B: 新增 `timeout` 事件處理，捕捉超時錯誤
-            .on('timeout', (err) => {
-                console.error('❌ FFmpeg 處理影片超時！');
-                reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
-            })
-            .on('end', () => {
-                console.log('✅ 影片壓縮完成');
-                resolve();
-            })
-            .on('error', (err) => {
-                console.error('❌ FFmpeg 處理影片錯誤:', err.message);
-                reject(new Error(`FFmpeg 處理影片失敗: ${err.message}`));
-            })
-            .save(outputPath);
-    });
-
-        // 返回壓縮後的檔案資訊
-        return { path: outputPath, mime: 'video/mp4', ext: outputExt };
-
-    } 
-    
-    // ... (在 processMedia 函式內部)
-
-// =========================================================================
-// 2. 檢查是否為 HEIC 格式 (執行 HEIC 轉 JPEG 邏輯)
-// =========================================================================
-else if (
-    originalMime === 'image/heic' || 
-    originalMime === 'image/heif' || 
-    originalMime === 'image/heic-sequence' || 
-    originalMime === 'image/heif-sequence' || 
-    originalExt === '.heic' || 
-    originalExt === '.heif'
-) {
-    
-    const outputExt = '.jpeg';
-    const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
-    
-    console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG');
-
-    // HEIC/HEIF 轉換邏輯
-    await new Promise((resolve, reject) => {
-         ffmpeg(originalPath)
-            .outputOptions([
-                // ⭐ 修正 A: 確保使用正確的編碼器（libx264 適用於大多數圖片轉換）
-                '-c:v libx264', 
-                // ⭐ 修正 B: 設定輸出為單一畫面，品質為 2
-                '-vframes 1', 
-                '-q:v 2' 
-            ])
-            .on('end', () => {
-                console.log('✅ HEIC 轉換為 JPEG 完成');
-                resolve();
-            })
-            .on('error', (err) => {
-                console.error('❌ FFmpeg 處理 HEIC 錯誤:', err.message);
-                reject(new Error(`FFmpeg 處理 HEIC 失敗: ${err.message}`));
-            })
-            .save(outputPath);
-    });
-    
-    // 返回轉換後的檔案資訊
-    return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
-    
-}
-    
+    // ⭐ 1. 優先檢查標準圖片格式 (確保它們跳過所有複雜邏輯)
     // =========================================================================
-    // 3. 檢查是否為標準圖片格式 (跳過處理，直接使用原始檔)
-    // =========================================================================
-    else if (
+    if (
         originalMime === 'image/jpeg' || 
         originalMime === 'image/png' || 
         originalMime === 'image/webp' || 
@@ -237,9 +144,91 @@ else if (
         originalExt === '.png' ||
         originalExt === '.webp' 
     ) {
+        console.log(`🖼️ 偵測到標準圖片 (${originalMime})，跳過 FFmpeg 處理。`);
         // 如果是標準圖片，則直接使用原始檔案
         return { path: originalPath, mime: originalMime, ext: originalExt };
     }
+    
+    // =========================================================================
+    // 2. 檢查是否為 HEIC 格式 (執行 HEIC 轉 JPEG 邏輯)
+    // =========================================================================
+    else if (
+        originalMime === 'image/heic' || 
+        originalMime === 'image/heif' || 
+        originalMime === 'image/heic-sequence' || 
+        originalMime === 'image/heif-sequence' || 
+        originalExt === '.heic' || 
+        originalExt === '.heif'
+    ) {
+        
+        const outputExt = '.jpeg';
+        const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
+        
+        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG');
+
+        // HEIC/HEIF 轉換邏輯
+        await new Promise((resolve, reject) => {
+             ffmpeg(originalPath)
+                .outputOptions([
+                    '-c:v libx264', 
+                    '-vframes 1', 
+                    '-q:v 2' 
+                ])
+                .on('end', () => {
+                    console.log('✅ HEIC 轉換為 JPEG 完成');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('❌ FFmpeg 處理 HEIC 錯誤:', err.message);
+                    reject(new Error(`FFmpeg 處理 HEIC 失敗: ${err.message}`));
+                })
+                .save(outputPath);
+        });
+        
+        return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
+        
+    }
+
+    // =========================================================================
+    // 3. 檢查是否為影片檔案 (執行修正點 A: ultrafast 壓縮)
+    // =========================================================================
+    else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
+        
+        const outputExt = '.mp4';
+        const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-compressed${outputExt}`);
+
+        console.log(`🎬 偵測到影片，開始壓縮到 ${outputPath}`);
+        
+        // 影片壓縮邏輯
+        await new Promise((resolve, reject) => {
+            ffmpeg(originalPath)
+                .outputOptions([
+                    '-c:v libx264',
+                    '-preset ultrafast', 
+                    '-crf 28', 
+                    '-pix_fmt yuv420p', 
+                    '-c:a aac',
+                    '-b:a 128k',
+                    '-movflags frag_keyframe+empty_moov'
+                ])
+                .on('timeout', (err) => {
+                    console.error('❌ FFmpeg 處理影片超時！');
+                    reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
+                })
+                .on('end', () => {
+                    console.log('✅ 影片壓縮完成');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('❌ FFmpeg 處理影片錯誤:', err.message);
+                    reject(new Error(`FFmpeg 處理影片失敗: ${err.message}`));
+                })
+                .save(outputPath);
+        });
+
+        return { path: outputPath, mime: 'video/mp4', ext: outputExt };
+
+    } 
     
     // =========================================================================
     // 4. 其他檔案類型 (拋出錯誤)
