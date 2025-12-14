@@ -14,6 +14,11 @@ const ffmpeg = require('fluent-ffmpeg');
 // 引入 node:stream (用於將 ffmpeg 輸出導向 R2)
 const { PassThrough } = require('node:stream');
 
+// ⭐ 修正點 2.1: 引入 sharp 和 heic-convert 
+// 解決 FFmpeg 無法處理 HEIC 的問題
+const sharp = require('sharp'); 
+const heicConvert = require('heic-convert'); 
+
 const app = express();
 app.use(cors()); 
 app.use(express.json()); 
@@ -39,13 +44,12 @@ const upload = multer({
 // 取得環境變數 - Cloudflare R2 專用
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-// ⭐ 修正點 1.1: 移除 R2_ENDPOINT，新增 R2_API_ENDPOINT 和 R2_PUBLIC_URL
 const R2_API_ENDPOINT = process.env.R2_API_ENDPOINT;     // S3 API 客戶端端點 (用於上傳/刪除)
 const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;       // 公用開發 URL (用於公開顯示)
 const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME; // 貯體名稱
 const MONGODB_URL = process.env.MONGODB_URL; 
 
-// ⭐ 修正點 1.2: 檢查所有 R2 變數 (R2_ENDPOINT 已移除)
+// 檢查所有 R2 變數
 if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_API_ENDPOINT || !R2_PUBLIC_URL || !R2_BUCKET_NAME || !MONGODB_URL) {
     console.error("❌ 錯誤：必要的環境變數缺失 (R2 或 MongoDB)");
     process.exit(1); 
@@ -58,7 +62,6 @@ if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_API_ENDPOINT || !R2_PUBLIC
 // 實例化 S3 Client (用於連線 R2)
 const s3Client = new S3Client({
     region: 'auto', // R2 建議使用 'auto'
-    // ⭐ 修正點 2: 使用 R2_API_ENDPOINT 進行 API 認證（修正打字錯誤）
     endpoint: R2_API_ENDPOINT,
     credentials: {
         accessKeyId: R2_ACCESS_KEY_ID,
@@ -67,10 +70,9 @@ const s3Client = new S3Client({
 });
 
 // ----------------------------------------------------
-// 2. FFmpeg 額外設定 (Zeabur 環境下可能不需要，但可保持相容性)
+// 2. FFmpeg 額外設定 (保持相容性)
 // ----------------------------------------------------
 // 假設 FFmpeg 和 FFprobe 已經在 PATH 中 (由 install-ffmpeg.sh 完成)
-// 如果需要明確設定路徑，可以解除註解以下兩行：
 ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
 ffmpeg.setFfprobePath('/usr/bin/ffprobe');
 
@@ -105,35 +107,35 @@ const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
 // ----------------------------------------------------
-// 4. 輔助函式 (Cloudflare R2 相關) - 替換原 GitHub 函式
+// 4. 輔助函式 (Cloudflare R2 相關)
 // ----------------------------------------------------
 
 /**
  * 從 R2 刪除單個檔案
- * @param {string} storageFileName - 儲存於 R2 的檔名 (含時間戳)
- * @returns {Promise<void>}
  */
-async function deleteFileFromR2(storageFileName) { // <--- 函式名稱已變更
+async function deleteFileFromR2(storageFileName) {
     const params = {
         Bucket: R2_BUCKET_NAME,
-        Key: `images/${storageFileName}`, // 保持與 GitHub 儲存路徑一致 (images/檔名)
+        Key: `images/${storageFileName}`, 
     };
     
-    // 使用 DeleteObjectCommand 刪除檔案
     await s3Client.send(new DeleteObjectCommand(params));
 }
 
 // ----------------------------------------------------
-// 5. 輔助函式 - 影片/HEIC 處理 (使用 FFmpeg)
+// 5. 輔助函式 - 媒體處理 (使用 sharp/heic-convert 和 FFmpeg)
 // ----------------------------------------------------
 
+/**
+ * 使用 FFmpeg 或 sharp 處理媒體檔案 (壓縮影片/轉換 HEIC 到 JPEG)
+ */
 async function processMedia(file) {
     const originalPath = file.path;
     const originalMime = file.mimetype;
     const originalExt = path.extname(file.originalname).toLowerCase();
     
     // =========================================================================
-    // ⭐ 1. 優先檢查標準圖片格式 (確保它們跳過所有複雜邏輯)
+    // 1. 優先檢查標準圖片格式 (確保它們跳過所有複雜邏輯)
     // =========================================================================
     if (
         originalMime === 'image/jpeg' || 
@@ -145,12 +147,13 @@ async function processMedia(file) {
         originalExt === '.webp' 
     ) {
         console.log(`🖼️ 偵測到標準圖片 (${originalMime})，跳過 FFmpeg 處理。`);
-        // 如果是標準圖片，則直接使用原始檔案
+        // 直接使用原始檔案
         return { path: originalPath, mime: originalMime, ext: originalExt };
     }
     
     // =========================================================================
-    // 2. 檢查是否為 HEIC 格式 (執行 HEIC 轉 JPEG 邏輯)
+    // ⭐ 2. 修正點 2.2: 檢查是否為 HEIC 格式 (使用 sharp/heic-convert 轉換到 JPEG)
+    // 解決 FFmpeg 編解碼器缺失問題
     // =========================================================================
     else if (
         originalMime === 'image/heic' || 
@@ -164,33 +167,36 @@ async function processMedia(file) {
         const outputExt = '.jpeg';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
         
-        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG');
-
-        // HEIC/HEIF 轉換邏輯
-        await new Promise((resolve, reject) => {
-             ffmpeg(originalPath)
-                .outputOptions([
-                    '-c:v libx264', 
-                    '-vframes 1', 
-                    '-q:v 2' 
-                ])
-                .on('end', () => {
-                    console.log('✅ HEIC 轉換為 JPEG 完成');
-                    resolve();
-                })
-                .on('error', (err) => {
-                    console.error('❌ FFmpeg 處理 HEIC 錯誤:', err.message);
-                    reject(new Error(`FFmpeg 處理 HEIC 失敗: ${err.message}`));
-                })
-                .save(outputPath);
-        });
+        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG (使用 sharp/heic-convert)');
         
+        try {
+            // 1. 讀取原始 HEIC 檔案內容 (Buffer)
+            const inputBuffer = fs.readFileSync(originalPath);
+            
+            // 2. 轉換 HEIC Buffer 到 JPEG Buffer
+            const jpegBuffer = await heicConvert({
+                buffer: inputBuffer,
+                format: 'JPEG', 
+                quality: 0.9    
+            });
+
+            // 3. 寫入磁碟
+            fs.writeFileSync(outputPath, jpegBuffer);
+            
+            console.log('✅ HEIC 轉換為 JPEG 完成');
+
+        } catch (err) {
+            console.error('❌ sharp/heic-convert 處理 HEIC 錯誤:', err.message);
+            throw new Error(`HEIC 轉換失敗: ${err.message}`);
+        }
+        
+        // 返回轉換後的檔案資訊
         return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
         
     }
 
     // =========================================================================
-    // 3. 檢查是否為影片檔案 (執行修正點 A: ultrafast 壓縮)
+    // 3. 檢查是否為影片檔案 (FFmpeg 壓縮)
     // =========================================================================
     else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
         
@@ -204,14 +210,14 @@ async function processMedia(file) {
             ffmpeg(originalPath)
                 .outputOptions([
                     '-c:v libx264',
-                    '-preset ultrafast', 
+                    '-preset ultrafast', // 極速預設
                     '-crf 28', 
                     '-pix_fmt yuv420p', 
                     '-c:a aac',
                     '-b:a 128k',
                     '-movflags frag_keyframe+empty_moov'
                 ])
-                .on('timeout', (err) => {
+                .on('timeout', (err) => { // 捕捉超時錯誤
                     console.error('❌ FFmpeg 處理影片超時！');
                     reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
                 })
@@ -226,6 +232,7 @@ async function processMedia(file) {
                 .save(outputPath);
         });
 
+        // 返回壓縮後的檔案資訊
         return { path: outputPath, mime: 'video/mp4', ext: outputExt };
 
     } 
@@ -452,8 +459,8 @@ app.delete('/api/photos/:id', async (req, res) => {
             return res.status(404).json({ error: '找不到該照片' });
         }
         
-// 1. 從 R2 刪除檔案 (使用輔助函式)
-        await deleteFileFromR2(photo.storageFileName); // <--- 替換為新的 R2 函式
+        // 1. 從 R2 刪除檔案 (使用輔助函式)
+        await deleteFileFromR2(photo.storageFileName); 
         
         // 2. 從 MongoDB 刪除記錄
         await Photo.findByIdAndDelete(req.params.id);
@@ -465,9 +472,8 @@ app.delete('/api/photos/:id', async (req, res) => {
 
         res.json({ message: '照片已成功刪除' });
 
-// ...
     } catch (error) {
-        const errorMessage = error.message; // ✅ 直接取 message
+        const errorMessage = error.message; 
         console.error('刪除照片失敗:', errorMessage);
         res.status(500).json({ error: `無法刪除照片。錯誤訊息：${errorMessage}` });
     }
@@ -493,11 +499,11 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     // 找出所有需要刪除的照片
     const photos = await Photo.find({ _id: { $in: photoIds } }).exec();
     
-    // ⭐ 關鍵修正：使用 for...of 迴圈確保循序執行，避免 GitHub 409 衝突
+    // 關鍵修正：使用 for...of 迴圈確保循序執行
     for (const photo of photos) {
         try {
             // 1. 執行 R2 刪除
-            await deleteFileFromR2(photo.storageFileName); // ✅ 正確呼叫 R2 刪除函式
+            await deleteFileFromR2(photo.storageFileName); 
 
             // 2. 刪除資料庫紀錄
             await Photo.deleteOne({ _id: photo._id });
@@ -509,13 +515,12 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
 
             successes.push(photo._id);
         } catch (error) {
-// 捕獲並記錄 R2 或資料庫錯誤
-            const errorMessage = error.message; // 簡化 R2 錯誤訊息
+            const errorMessage = error.message; 
             console.error(`刪除照片 ${photo._id} 失敗:`, errorMessage);
             
             failures.push({ 
                 _id: photo._id, 
-                error: `R2 刪除失敗: ${errorMessage}` // 調整錯誤訊息
+                error: `R2 刪除失敗: ${errorMessage}` 
             });
         }
     }
@@ -556,8 +561,7 @@ app.post('/api/photos/bulkMove', async (req, res) => {
     const failures = [];
     
     try {
-        // 1. 找出所有待移動照片的舊相簿 ID (用於扣減舊相簿的計數)
-        // 這裡需要確保 photoIds 都是有效的 ID
+        // 1. 找出所有待移動照片的舊相簿 ID 
         const photos = await Photo.find({ _id: { $in: photoIds } }).select('albumId');
         if (photos.length === 0) {
             return res.status(404).json({ error: '找不到任何指定的照片。' });
@@ -566,28 +570,27 @@ app.post('/api/photos/bulkMove', async (req, res) => {
         // 2. 建立舊相簿計數變更地圖
         const oldAlbumUpdates = new Map();
         photos.forEach(photo => {
-            const oldId = photo.albumId ? photo.albumId.toString() : 'null'; // 處理 albumId 為 null 的情況
+            const oldId = photo.albumId ? photo.albumId.toString() : 'null'; 
             
-            // 避免將照片從 A 移動到 A，導致重複更新計數
+            // 避免將照片從 A 移動到 A
             if (oldId !== targetAlbumId.toString()) { 
                  oldAlbumUpdates.set(oldId, (oldAlbumUpdates.get(oldId) || 0) + 1);
             }
         });
 
-        // 3. 在資料庫中執行批量更新操作 (將 albumId 設為新的 targetAlbumId)
+        // 3. 在資料庫中執行批量更新操作 
         const updateResult = await Photo.updateMany(
-            { _id: { $in: photoIds }, albumId: { $ne: targetAlbumId } }, // 排除已經在目標相簿中的照片
+            { _id: { $in: photoIds }, albumId: { $ne: targetAlbumId } }, 
             { $set: { albumId: targetAlbumId } }
         );
         
-        // 實際移動的照片數量 (成功寫入 DB 的數量)
         const actualMovedCount = updateResult.modifiedCount;
 
         if (updateResult.acknowledged) {
-            // 4. 更新舊相簿的 photoCount (進行扣減)
+            // 4. 更新舊相簿的 photoCount 
             const decrementPromises = [];
             for (const [oldAlbumId, count] of oldAlbumUpdates.entries()) {
-                if (oldAlbumId !== targetAlbumId.toString()) { // 再次確認，不從目標相簿中扣減
+                if (oldAlbumId !== targetAlbumId.toString()) { 
                      decrementPromises.push(
                         Album.findByIdAndUpdate(oldAlbumId, { $inc: { photoCount: -count } })
                     );
@@ -595,16 +598,14 @@ app.post('/api/photos/bulkMove', async (req, res) => {
             }
             await Promise.allSettled(decrementPromises);
 
-            // 5. 更新新相簿的 photoCount (進行增加)
+            // 5. 更新新相簿的 photoCount 
             if (actualMovedCount > 0) {
                  await Album.findByIdAndUpdate(targetAlbumId, { $inc: { photoCount: actualMovedCount } });
             }
             
-            // 由於 updateMany 成功，所有 photoIds 都算成功
             photos.forEach(p => successes.push(p._id));
             
         } else {
-            // 如果 updateMany 沒有確認成功，則視為失敗
             photoIds.forEach(id => failures.push({ _id: id, error: '資料庫更新失敗' }));
         }
 
@@ -627,7 +628,28 @@ app.post('/api/photos/bulkMove', async (req, res) => {
 
 // 檔案上傳 API
 app.post('/upload', upload.array('photos'), async (req, res) => {
-    // ... (所有前置的 album 變數設定保持不變) ...
+    if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: '沒有收到照片檔案' });
+    }
+
+    const { targetAlbumId } = req.body; 
+    
+    // 確保 defaultAlbum 存在且定義
+    let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
+    if (!defaultAlbum) {
+        defaultAlbum = new Album({ name: '未分類相簿' });
+        await defaultAlbum.save();
+    }
+    
+    // ⭐ 修正點 1.1: 確保 targetAlbum 變數在迴圈外部被定義，解決 ReferenceError
+    let targetAlbum = defaultAlbum; 
+    
+    if (targetAlbumId) {
+        const foundAlbum = await Album.findById(targetAlbumId);
+        if (foundAlbum) {
+            targetAlbum = foundAlbum; 
+        }
+    }
     
     const results = [];
     let successCount = 0;
@@ -641,10 +663,8 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         let processedMedia; 
 
         try {
-            // =======================================================
-            // ⭐ 1. 關鍵步驟：呼叫 processMedia 取得處理後的結果
-            // =======================================================
-            processedMedia = await processMedia(file); // 使用上方修正後的函式
+            // 1. 呼叫 processMedia 取得處理後的結果
+            processedMedia = await processMedia(file); 
             
             // 2. 判斷是否產生了新的暫存檔
             if (processedMedia.path !== file.path) {
@@ -652,7 +672,6 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
             }
             
             // 3. 準備 R2 相關變數
-            // 修正：使用處理後的副檔名 processedMedia.ext
             const rawFileName = `${Date.now()}-${baseName.replace(path.extname(baseName), processedMedia.ext)}`; 
             const fileKey = `images/${rawFileName}`; 
             
@@ -664,7 +683,7 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 Bucket: R2_BUCKET_NAME,
                 Key: fileKey,
                 Body: fileStream, 
-                ContentType: processedMedia.mime, // 使用處理後的 MIME 類型
+                ContentType: processedMedia.mime, 
                 ACL: 'public-read' 
             };
             
@@ -678,7 +697,7 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 originalFileName: originalnameFixed,
                 storageFileName: rawFileName,
                 githubUrl: r2PublicUrl, 
-                albumId: targetAlbum._id 
+                albumId: targetAlbum._id // 這裡使用了確保定義的 targetAlbum
             });
             await newPhoto.save();
             
@@ -713,7 +732,10 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
     }
 
     if (successCount > 0) {
-        await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: successCount } });
+        // ⭐ 修正點 1.2: 確保 targetAlbum 存在，解決 ReferenceError
+        if (targetAlbum) { 
+            await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: successCount } });
+        }
     }
 
     return res.json({ 
