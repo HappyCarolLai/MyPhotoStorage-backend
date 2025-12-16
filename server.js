@@ -23,6 +23,11 @@ const app = express();
 app.use(cors()); 
 app.use(express.json()); 
 
+// ⭐ 關鍵修正：設定靜態檔案服務
+// 將專案根目錄（包含 upload.html, upload.js, style.css, 和 ffmpeg_static）
+// 設定為 Express 的靜態資源目錄。
+app.use(express.static(path.join(__dirname, '')));
+
 // 修正點 1: 使用 diskStorage 將檔案暫存到磁碟，避免記憶體溢出 (OOM)
 const upload = multer({ 
     storage: multer.diskStorage({
