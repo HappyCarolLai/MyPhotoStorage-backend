@@ -693,7 +693,9 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
                 Key: fileKey,
                 Body: fileStream, 
                 ContentType: processedMedia.mime, 
-                ACL: 'public-read' 
+                ACL: 'public-read', 
+                // ⭐ 修正 3：加入 Cache-Control Header，設置為一年快取
+                CacheControl: 'public, max-age=31536000, immutable' 
             };
             
             // 6. 執行 R2 上傳
