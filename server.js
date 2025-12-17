@@ -10,7 +10,7 @@ const cors = require('cors');
 // 引入 AWS S3 Client
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 // 新增: 引入 fluent-ffmpeg
-// const ffmpeg = require('fluent-ffmpeg'); 
+const ffmpeg = require('fluent-ffmpeg'); // ⭐ 關鍵修正 1：取消註釋
 // 引入 node:stream (用於將 ffmpeg 輸出導向 R2)
 // const { PassThrough } = require('node:stream');
 
@@ -157,8 +157,7 @@ async function processMedia(file) {
     }
     
     // =========================================================================
-    // ⭐ 2. 修正點 2.2: 檢查是否為 HEIC 格式 (使用 sharp/heic-convert 轉換到 JPEG)
-    // 解決 FFmpeg 編解碼器缺失問題
+    // 2. 檢查是否為 HEIC 格式 (使用 sharp/heic-convert 轉換到 JPEG)
     // =========================================================================
     else if (
         originalMime === 'image/heic' || 
@@ -199,57 +198,49 @@ async function processMedia(file) {
         return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
         
     }
-
+    
     // =========================================================================
-    // 3. 檢查是否為影片檔案 (✅ 前端已處理，後端僅做直傳/跳過高負載運算)
+    // 3. 檢查是否為影片檔案 (⭐ 啟用後端 FFmpeg 壓縮)
     // =========================================================================
     else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4' || originalExt === '.webm') {
 
-    console.log(`🎬 偵測到影片檔案，假設已由前端壓縮，準備直傳。`);
-    // 直接使用原始檔案
-    return { path: originalPath, mime: originalMime, ext: originalExt };
-}
-    // =========================================================================
-    // 3. 檢查是否為影片檔案 (FFmpeg 壓縮)
-    // =========================================================================
-    // else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
+        const outputExt = '.mp4';
+        const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-compressed${outputExt}`);
 
-        // const outputExt = '.mp4';
-        // const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-compressed${outputExt}`);
-
-        // console.log(`🎬 偵測到影片，開始壓縮到 ${outputPath}`);
+        console.log(`🎬 偵測到影片，開始壓縮到 ${outputPath}`);
         
-        // 影片壓縮邏輯
-        // await new Promise((resolve, reject) => {
-            // ffmpeg(originalPath)
-                // .outputOptions([
-                    // '-c:v libx264',
-                    // '-preset ultrafast', // 極速預設
-                    // '-crf 28', 
-                    // '-pix_fmt yuv420p', 
-                    // '-c:a aac',
-                    // '-b:a 128k',
-                    // '-movflags frag_keyframe+empty_moov'
-                // ])
-                // .on('timeout', (err) => { // 捕捉超時錯誤
-                    // console.error('❌ FFmpeg 處理影片超時！');
-                    // reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
-                // })
-                // .on('end', () => {
-                    // console.log('✅ 影片壓縮完成');
-                    // resolve();
-                // })
-                // .on('error', (err) => {
-                    // console.error('❌ FFmpeg 處理影片錯誤:', err.message);
-                    // reject(new Error(`FFmpeg 處理影片失敗: ${err.message}`));
-                // })
-                // .save(outputPath);
-        // });
+        // 影片壓縮邏輯 (使用 Promise 確保執行完成)
+        await new Promise((resolve, reject) => {
+            ffmpeg(originalPath)
+                .outputOptions([
+                    // ⭐ 壓縮參數調整：使用 veryfast 平衡速度和品質，減少 CPU 負載時間
+                    '-c:v libx264',
+                    '-preset veryfast', // 速度預設：veryfast
+                    '-crf 28',          // 質量控制：CRF 28 檔案較小，質量適合相簿
+                    '-pix_fmt yuv420p', 
+                    '-c:a aac',
+                    '-b:a', '128k',
+                    '-movflags', 'frag_keyframe+empty_moov'
+                ])
+                .on('timeout', (err) => { // 捕捉超時錯誤
+                    console.error('❌ FFmpeg 處理影片超時！');
+                    reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
+                })
+                .on('end', () => {
+                    console.log('✅ 影片壓縮完成');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('❌ FFmpeg 處理影片錯誤:', err.message);
+                    reject(new Error(`FFmpeg 處理影片失敗: ${err.message}`));
+                })
+                .save(outputPath);
+        });
 
         // 返回壓縮後的檔案資訊
-        // return { path: outputPath, mime: 'video/mp4', ext: outputExt };
-        //}
-
+        return { path: outputPath, mime: 'video/mp4', ext: outputExt };
+        
+    } // 影片處理結束
     
     // =========================================================================
     // 4. 其他檔案類型 (拋出錯誤)
