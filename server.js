@@ -10,12 +10,11 @@ const cors = require('cors');
 // 引入 AWS S3 Client
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 // 新增: 引入 fluent-ffmpeg
-const ffmpeg = require('fluent-ffmpeg'); // ⭐ 關鍵修正 1：取消註釋
+const ffmpeg = require('fluent-ffmpeg'); // ⭐ 關鍵修正 1：啟用 FFmpeg
 // 引入 node:stream (用於將 ffmpeg 輸出導向 R2)
 // const { PassThrough } = require('node:stream');
 
-// ⭐ 修正點 2.1: 引入 sharp 和 heic-convert 
-// 解決 FFmpeg 無法處理 HEIC 的問題
+// 引入 sharp 和 heic-convert 
 const sharp = require('sharp'); 
 const heicConvert = require('heic-convert'); 
 
@@ -23,9 +22,10 @@ const app = express();
 app.use(cors()); 
 app.use(express.json()); 
 
-// ⭐ 關鍵修正：設定靜態檔案服務
-// 將專案根目錄（包含 upload.html, upload.js, style.css, 和 ffmpeg_static）
-// 設定為 Express 的靜態資源目錄。
+// ⭐ 全域變數：追蹤所有背景處理任務
+const mediaTasks = {}; 
+
+// 設定靜態檔案服務
 app.use(express.static(path.join(__dirname, '')));
 
 // 修正點 1: 使用 diskStorage 將檔案暫存到磁碟，避免記憶體溢出 (OOM)
@@ -41,7 +41,7 @@ const upload = multer({
         }
     }),
     limits: {
-        // 修正點 2: 設定檔案大小上限為 500MB (可依需求調整)
+        // 設定檔案大小上限為 500MB (可依需求調整)
         fileSize: 500 * 1024 * 1024 // 500MB
     }
 }); 
@@ -49,9 +49,9 @@ const upload = multer({
 // 取得環境變數 - Cloudflare R2 專用
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const R2_API_ENDPOINT = process.env.R2_API_ENDPOINT;     // S3 API 客戶端端點 (用於上傳/刪除)
-const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;       // 公用開發 URL (用於公開顯示)
-const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME; // 貯體名稱
+const R2_API_ENDPOINT = process.env.R2_API_ENDPOINT;
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
 const MONGODB_URL = process.env.MONGODB_URL; 
 
 // 檢查所有 R2 變數
@@ -61,7 +61,7 @@ if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_API_ENDPOINT || !R2_PUBLIC
 }
 
 // ----------------------------------------------------
-// 1. 輔助函式 (Cloudflare R2 相關) - 在此處新增 R2 Client 初始化
+// 1. 輔助函式 (Cloudflare R2 相關)
 // ----------------------------------------------------
 
 // 實例化 S3 Client (用於連線 R2)
@@ -74,11 +74,23 @@ const s3Client = new S3Client({
     }
 });
 
+/**
+ * 從 R2 刪除單個檔案
+ */
+async function deleteFileFromR2(storageFileName) {
+    const params = {
+        Bucket: R2_BUCKET_NAME,
+        Key: `images/${storageFileName}`, 
+    };
+    
+    await s3Client.send(new DeleteObjectCommand(params));
+}
+
 // ----------------------------------------------------
-// 2. FFmpeg 額外設定 (保持相容性)
+// 2. FFmpeg 額外設定 (假設 install-ffmpeg.sh 已完成安裝)
 // ----------------------------------------------------
-// 假設 FFmpeg 和 FFprobe 已經在 PATH 中 (由 install-ffmpeg.sh 完成)
-// ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+// 保持註釋，假設 FFmpeg 已在 PATH 中
+// ffmpeg.setFfmpegPath('/usr/bin/ffmpeg'); 
 // ffmpeg.setFfprobePath('/usr/bin/ffprobe');
 
 
@@ -111,24 +123,9 @@ const AlbumSchema = new mongoose.Schema({
 const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
-// ----------------------------------------------------
-// 4. 輔助函式 (Cloudflare R2 相關)
-// ----------------------------------------------------
-
-/**
- * 從 R2 刪除單個檔案
- */
-async function deleteFileFromR2(storageFileName) {
-    const params = {
-        Bucket: R2_BUCKET_NAME,
-        Key: `images/${storageFileName}`, 
-    };
-    
-    await s3Client.send(new DeleteObjectCommand(params));
-}
 
 // ----------------------------------------------------
-// 5. 輔助函式 - 媒體處理 (使用 sharp/heic-convert 和 FFmpeg)
+// 4. 輔助函式 - 媒體處理 (使用 sharp/heic-convert 和 FFmpeg)
 // ----------------------------------------------------
 
 /**
@@ -140,7 +137,7 @@ async function processMedia(file) {
     const originalExt = path.extname(file.originalname).toLowerCase();
     
     // =========================================================================
-    // 1. 優先檢查標準圖片格式 (確保它們跳過所有複雜邏輯)
+    // 1. 標準圖片格式 (直傳)
     // =========================================================================
     if (
         originalMime === 'image/jpeg' || 
@@ -151,13 +148,12 @@ async function processMedia(file) {
         originalExt === '.png' ||
         originalExt === '.webp' 
     ) {
-        console.log(`🖼️ 偵測到標準圖片 (${originalMime})，跳過 FFmpeg 處理。`);
-        // 直接使用原始檔案
+        console.log(`🖼️ 偵測到標準圖片 (${originalMime})，跳過處理。`);
         return { path: originalPath, mime: originalMime, ext: originalExt };
     }
     
     // =========================================================================
-    // 2. 檢查是否為 HEIC 格式 (使用 sharp/heic-convert 轉換到 JPEG)
+    // 2. HEIC 格式 (轉換到 JPEG)
     // =========================================================================
     else if (
         originalMime === 'image/heic' || 
@@ -171,20 +167,15 @@ async function processMedia(file) {
         const outputExt = '.jpeg';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
         
-        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG (使用 sharp/heic-convert)');
+        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG');
         
         try {
-            // 1. 讀取原始 HEIC 檔案內容 (Buffer)
             const inputBuffer = fs.readFileSync(originalPath);
-            
-            // 2. 轉換 HEIC Buffer 到 JPEG Buffer
             const jpegBuffer = await heicConvert({
                 buffer: inputBuffer,
                 format: 'JPEG', 
                 quality: 0.9    
             });
-
-            // 3. 寫入磁碟
             fs.writeFileSync(outputPath, jpegBuffer);
             
             console.log('✅ HEIC 轉換為 JPEG 完成');
@@ -194,13 +185,12 @@ async function processMedia(file) {
             throw new Error(`HEIC 轉換失敗: ${err.message}`);
         }
         
-        // 返回轉換後的檔案資訊
         return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
         
     }
     
     // =========================================================================
-    // 3. 檢查是否為影片檔案 (⭐ 啟用後端 FFmpeg 壓縮)
+    // 3. 影片檔案 (⭐ FFmpeg 壓縮)
     // =========================================================================
     else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4' || originalExt === '.webm') {
 
@@ -213,16 +203,16 @@ async function processMedia(file) {
         await new Promise((resolve, reject) => {
             ffmpeg(originalPath)
                 .outputOptions([
-                    // ⭐ 壓縮參數調整：使用 veryfast 平衡速度和品質，減少 CPU 負載時間
+                    // 壓縮參數調整：使用 veryfast 平衡速度和品質
                     '-c:v libx264',
-                    '-preset veryfast', // 速度預設：veryfast
-                    '-crf 28',          // 質量控制：CRF 28 檔案較小，質量適合相簿
+                    '-preset veryfast', 
+                    '-crf 28',          
                     '-pix_fmt yuv420p', 
                     '-c:a aac',
                     '-b:a', '128k',
                     '-movflags', 'frag_keyframe+empty_moov'
                 ])
-                .on('timeout', (err) => { // 捕捉超時錯誤
+                .on('timeout', (err) => { 
                     console.error('❌ FFmpeg 處理影片超時！');
                     reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
                 })
@@ -247,6 +237,105 @@ async function processMedia(file) {
     // =========================================================================
     throw new Error(`不支援的檔案類型: ${originalMime}`);
 }
+
+
+// ----------------------------------------------------
+// 5. 新增：背景處理函數 (核心邏輯)
+// ----------------------------------------------------
+async function processMediaInBackground(taskId) {
+    const task = mediaTasks[taskId];
+    if (!task) return; 
+
+    const { file, targetAlbum } = task;
+
+    // ⭐ 修正中文檔名亂碼：使用 Buffer 處理
+    const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
+
+    task.status = 'PROCESSING';
+    task.message = `開始處理檔案: ${originalnameFixed}`;
+    console.log(`[TASK ${taskId}] 開始處理: ${originalnameFixed}`);
+
+    const filesToCleanup = [file.path]; 
+    let processedMedia; 
+
+    try {
+        // 1. 媒體處理 (包含 HEIC 轉換或 FFmpeg 壓縮)
+        processedMedia = await processMedia(file); 
+        
+        task.message = '媒體處理完成，開始上傳 R2 雲端儲存...';
+        console.log(`[TASK ${taskId}] 媒體處理完成，開始上傳 R2...`); // 新增日誌
+
+        // 2. 判斷是否產生了新的暫存檔
+        if (processedMedia.path !== file.path) {
+            filesToCleanup.push(processedMedia.path);
+        }
+        
+        // 3. R2 上傳和 MongoDB 儲存邏輯 
+        const rawFileName = `${Date.now()}-${baseName.replace(path.extname(baseName), processedMedia.ext)}`; 
+        const fileKey = `images/${rawFileName}`; 
+        
+        // 讀取處理後的磁碟檔案串流
+        const fileStream = fs.createReadStream(processedMedia.path); 
+        
+        // 構造 R2 上傳參數
+        const uploadParams = {
+            Bucket: R2_BUCKET_NAME,
+            Key: fileKey,
+            Body: fileStream, 
+            ContentType: processedMedia.mime, 
+            ACL: 'public-read', 
+            CacheControl: 'public, max-age=31536000, immutable' 
+        };
+        
+        // 執行 R2 上傳
+        await s3Client.send(new PutObjectCommand(uploadParams));
+        
+        // 構造 R2 公開 URL & 儲存 MongoDB 紀錄
+        const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; 
+        
+        task.message = 'R2 上傳完成，寫入資料庫...';
+        console.log(`[TASK ${taskId}] R2 上傳完成，寫入資料庫...`); // 新增日誌
+
+        const newPhoto = new Photo({
+            originalFileName: originalnameFixed,
+            storageFileName: rawFileName,
+            githubUrl: r2PublicUrl, 
+            albumId: targetAlbum._id
+        });
+        await newPhoto.save();
+        
+        // 4. 更新相簿計數
+        await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: 1 } });
+        
+        // 5. 標記任務完成
+        task.status = 'COMPLETED';
+        task.message = `✅ 處理成功！耗時: ${((Date.now() - task.startTime) / 1000).toFixed(1)} 秒`;
+        task.resultUrl = r2PublicUrl;
+        console.log(`[TASK ${taskId}] 完成: ${originalnameFixed}`);
+
+    } catch (error) {
+        // 錯誤處理
+        const errorMessage = error.message;
+        task.status = 'FAILED';
+        task.message = `❌ 處理失敗: ${errorMessage}`;
+        console.error(`[TASK ${taskId}] 處理失敗: ${originalnameFixed} 錯誤:`, errorMessage);
+    } finally {
+        // 關鍵清理步驟：刪除所有臨時檔案
+        for (const p of filesToCleanup) {
+             try {
+                if (fs.existsSync(p)) {
+                    fs.unlinkSync(p);
+                }
+            } catch (cleanupError) {
+                console.error(`[TASK ${taskId}] 刪除暫存檔 ${p} 失敗:`, cleanupError.message);
+            }
+        }
+        // 清理任務物件 (10 分鐘後刪除，避免記憶體佔用)
+        setTimeout(() => delete mediaTasks[taskId], 600000); // 10 分鐘後刪除
+    }
+}
+
 
 // ----------------------------------------------------
 // 6. API 路由 - 相簿管理 (Albums)
@@ -486,11 +575,11 @@ app.delete('/api/photos/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 8. API 路由 - 批量照片操作 (新增部分，給前端 album-content.js 使用)
+// 8. API 路由 - 批量照片操作
 // ----------------------------------------------------
 
 /**
- * [POST] 批量刪除照片 (DELETE /api/photos/bulkDelete) - 修正為循序執行
+ * [POST] 批量刪除照片
  */
 app.post('/api/photos/bulkDelete', async (req, res) => {
     const { photoIds } = req.body;
@@ -504,7 +593,7 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     // 找出所有需要刪除的照片
     const photos = await Photo.find({ _id: { $in: photoIds } }).exec();
     
-    // 關鍵修正：使用 for...of 迴圈確保循序執行
+    // 使用 for...of 迴圈確保循序執行
     for (const photo of photos) {
         try {
             // 1. 執行 R2 刪除
@@ -531,7 +620,6 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     }
 
     if (successes.length === 0 && failures.length > 0) {
-        // 如果全部失敗，回傳 500
         return res.status(500).json({
             error: `批量刪除請求失敗。成功 ${successes.length} 張，失敗 ${failures.length} 張。`,
             failures
@@ -547,7 +635,7 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
 
 
 /**
- * [POST] 批量移動照片 (POST /api/photos/bulkMove)
+ * [POST] 批量移動照片
  */
 app.post('/api/photos/bulkMove', async (req, res) => {
     const { photoIds, targetAlbumId } = req.body;
@@ -628,27 +716,45 @@ app.post('/api/photos/bulkMove', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 9. API 路由 - 檔案上傳 (Upload) 
+// 9. API 路由 - 任務狀態追蹤 (New API)
 // ----------------------------------------------------
 
-// 檔案上傳 API
-app.post('/upload', upload.array('photos'), async (req, res) => {
+// [GET] 取得特定任務的狀態
+app.get('/api/tasks/status/:taskId', (req, res) => {
+    const taskId = req.params.taskId;
+    const task = mediaTasks[taskId];
+
+    if (!task) {
+        // 如果任務在伺服器端已經被清理（超過 10 分鐘），則回傳 404
+        return res.status(404).json({ error: '找不到該任務ID，可能已過期或完成。' });
+    }
+    
+    // 限制傳輸的資訊
+    const { status, message, resultUrl, originalFileName } = task;
+
+    res.json({ status, message, resultUrl, originalFileName });
+});
+
+
+// ----------------------------------------------------
+// 10. API 路由 - 檔案上傳 (新的非同步提交 API)
+// ----------------------------------------------------
+
+// 檔案上傳 API (僅處理接收檔案，並啟動背景任務)
+app.post('/api/tasks/submit-upload', upload.array('photos'), async (req, res) => {
     if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: '沒有收到照片檔案' });
     }
 
     const { targetAlbumId } = req.body; 
-    
-    // 確保 defaultAlbum 存在且定義
+
+    // 確保 targetAlbum 存在，並定義 defaultAlbum
     let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
     if (!defaultAlbum) {
         defaultAlbum = new Album({ name: '未分類相簿' });
         await defaultAlbum.save();
     }
-    
-    // ⭐ 修正點 1.1: 確保 targetAlbum 變數在迴圈外部被定義，解決 ReferenceError
     let targetAlbum = defaultAlbum; 
-    
     if (targetAlbumId) {
         const foundAlbum = await Album.findById(targetAlbumId);
         if (foundAlbum) {
@@ -656,100 +762,39 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         }
     }
     
-    const results = [];
-    let successCount = 0;
+    // 立即回傳所有任務 ID
+    const taskIds = [];
     
     for (const file of req.files) {
         
+        // 修正中文檔名亂碼問題 (用於紀錄和追蹤)
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
-        const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
 
-        const filesToCleanup = [file.path]; 
-        let processedMedia; 
+        // 1. 創建唯一的 Task ID
+        const taskId = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`; 
 
-        try {
-            // 1. 呼叫 processMedia 取得處理後的結果
-            processedMedia = await processMedia(file); 
-            
-            // 2. 判斷是否產生了新的暫存檔
-            if (processedMedia.path !== file.path) {
-                filesToCleanup.push(processedMedia.path);
-            }
-            
-            // 3. 準備 R2 相關變數
-            const rawFileName = `${Date.now()}-${baseName.replace(path.extname(baseName), processedMedia.ext)}`; 
-            const fileKey = `images/${rawFileName}`; 
-            
-            // 4. 讀取處理後的磁碟檔案串流
-            const fileStream = fs.createReadStream(processedMedia.path); 
-            
-            // 5. 構造 R2 上傳參數
-            const uploadParams = {
-                Bucket: R2_BUCKET_NAME,
-                Key: fileKey,
-                Body: fileStream, 
-                ContentType: processedMedia.mime, 
-                ACL: 'public-read', 
-                // ⭐ 修正 3：加入 Cache-Control Header，設置為一年快取
-                CacheControl: 'public, max-age=31536000, immutable' 
-            };
-            
-            // 6. 執行 R2 上傳
-            await s3Client.send(new PutObjectCommand(uploadParams));
-            
-            // 7. 構造 R2 公開 URL & 儲存 MongoDB 紀錄
-            const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; 
+        // 2. 初始化任務狀態 (儲存在記憶體中)
+        mediaTasks[taskId] = {
+            status: 'PENDING',
+            message: '等待伺服器資源進行媒體處理...',
+            originalFileName: originalnameFixed, 
+            targetAlbum: targetAlbum,
+            file: file, // 儲存 multer 檔案物件
+            startTime: Date.now()
+        };
+        taskIds.push(taskId);
 
-            const newPhoto = new Photo({
-                originalFileName: originalnameFixed,
-                storageFileName: rawFileName,
-                githubUrl: r2PublicUrl, 
-                albumId: targetAlbum._id // 這裡使用了確保定義的 targetAlbum
-            });
-            await newPhoto.save();
-            
-            successCount += 1; 
-            results.push({
-                status: 'success', 
-                fileName: originalnameFixed, 
-                url: r2PublicUrl
-            });
-
-        } catch (error) {
-            // 錯誤處理
-            const errorMessage = error.message;
-            console.error(`處理/上傳 ${originalnameFixed} 失敗:`, errorMessage);
-            results.push({
-                status: 'error', 
-                fileName: originalnameFixed,
-                error: `媒體處理或 R2 上傳失敗。錯誤：${errorMessage}`
-            });
-        } finally {
-            // 關鍵清理步驟
-            for (const p of filesToCleanup) {
-                 try {
-                    if (fs.existsSync(p)) {
-                        fs.unlinkSync(p);
-                    }
-                } catch (cleanupError) {
-                    console.error(`刪除暫存檔 ${p} 失敗:`, cleanupError.message);
-                }
-            }
-        }
+        // 3. ⭐ 在背景啟動處理函數 (不等待 Promise)
+        processMediaInBackground(taskId); 
     }
 
-    if (successCount > 0) {
-        // ⭐ 修正點 1.2: 確保 targetAlbum 存在，解決 ReferenceError
-        if (targetAlbum) { 
-            await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: successCount } });
-        }
-    }
-
+    // 立即回應前端，讓前端開始輪詢
     return res.json({ 
-        message: `批次上傳完成，總計 ${results.length} 個檔案。`,
-        results: results
+        message: '檔案已提交，正在背景處理中。',
+        taskIds: taskIds
     });
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
