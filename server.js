@@ -127,17 +127,19 @@ const Album = mongoose.model('Album', AlbumSchema);
 // ----------------------------------------------------
 // 4. 輔助函式 - 媒體處理 (使用 sharp/heic-convert 和 FFmpeg)
 // ----------------------------------------------------
-
 /**
- * 使用 FFmpeg 或 sharp 處理媒體檔案 (壓縮影片/轉換 HEIC 到 JPEG)
+ * 使用 FFmpeg 或 sharp 處理媒體檔案 (壓縮影片/壓縮圖片/轉換 HEIC)
  */
 async function processMedia(file) {
     const originalPath = file.path;
     const originalMime = file.mimetype;
     const originalExt = path.extname(file.originalname).toLowerCase();
     
+    // ⭐ 修正中文檔名亂碼 (用於日誌顯示)
+    const logName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+
     // =========================================================================
-    // 1. 標準圖片格式 (直傳)
+    // 1. 標準圖片格式 (JPG, PNG, WEBP) -> ⭐ 加入 Sharp 壓縮邏輯
     // =========================================================================
     if (
         originalMime === 'image/jpeg' || 
@@ -148,96 +150,89 @@ async function processMedia(file) {
         originalExt === '.png' ||
         originalExt === '.webp' 
     ) {
-        console.log(`🖼️ 偵測到標準圖片 (${originalMime})，跳過處理。`);
-        return { path: originalPath, mime: originalMime, ext: originalExt };
+        const outputExt = '.jpg'; // 統一轉為 jpg 壓縮率最高
+        const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-optimized${outputExt}`);
+        
+        console.log(`🖼️ 偵測到圖片: ${logName}，開始進行尺寸與品質優化...`);
+
+        try {
+            await sharp(originalPath)
+                .rotate() // 自動修正手機拍攝方向
+                .resize({
+                    width: 2000, 
+                    height: 2000, 
+                    fit: 'inside', 
+                    withoutEnlargement: true // 小圖不放大
+                })
+                .jpeg({ 
+                    quality: 80, // 品質設為 80，檔案體積會大幅縮小
+                    mozjpeg: true 
+                })
+                .toFile(outputPath);
+            
+            console.log(`✅ 圖片優化完成: ${logName}`);
+            return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
+        } catch (err) {
+            console.error('❌ Sharp 處理圖片失敗，改回原始檔案:', err.message);
+            return { path: originalPath, mime: originalMime, ext: originalExt };
+        }
     }
     
     // =========================================================================
-    // 2. HEIC 格式 (轉換到 JPEG)
+    // 2. HEIC 格式 (轉換到 JPEG) -> 保持不變
     // =========================================================================
     else if (
         originalMime === 'image/heic' || 
         originalMime === 'image/heif' || 
-        originalMime === 'image/heic-sequence' || 
-        originalMime === 'image/heif-sequence' || 
         originalExt === '.heic' || 
         originalExt === '.heif'
     ) {
-        
         const outputExt = '.jpeg';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-converted${outputExt}`);
-        
-        console.log('📸 偵測到 HEIC/HEIF 檔案，開始轉換為 JPEG');
+        console.log(`📸 偵測到 HEIC 檔案: ${logName}，開始轉換...`);
         
         try {
             const inputBuffer = fs.readFileSync(originalPath);
             const jpegBuffer = await heicConvert({
                 buffer: inputBuffer,
                 format: 'JPEG', 
-                quality: 0.9    
+                quality: 0.8 // 轉換時也調低品質
             });
             fs.writeFileSync(outputPath, jpegBuffer);
             
-            console.log('✅ HEIC 轉換為 JPEG 完成');
-
+            // 可選：再過一次 sharp 確保方向與尺寸 (HEIC 轉出的 JPEG 有時還是很大)
+            const finalPath = outputPath + "-opt.jpg";
+            await sharp(outputPath).rotate().resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true }).toFile(finalPath);
+            
+            console.log('✅ HEIC 轉換與優化完成');
+            return { path: finalPath, mime: 'image/jpeg', ext: '.jpg' };
         } catch (err) {
-            console.error('❌ sharp/heic-convert 處理 HEIC 錯誤:', err.message);
+            console.error('❌ HEIC 轉換失敗:', err.message);
             throw new Error(`HEIC 轉換失敗: ${err.message}`);
         }
-        
-        return { path: outputPath, mime: 'image/jpeg', ext: outputExt };
-        
     }
     
     // =========================================================================
-    // 3. 影片檔案 (⭐ FFmpeg 壓縮)
+    // 3. 影片檔案 (FFmpeg 壓縮) -> 保持不變
     // =========================================================================
-    else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4' || originalExt === '.webm') {
-
+    else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
         const outputExt = '.mp4';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-compressed${outputExt}`);
-
-        console.log(`🎬 偵測到影片，開始壓縮到 ${outputPath}`);
+        console.log(`🎬 偵測到影片: ${logName}，開始壓縮...`);
         
-        // 影片壓縮邏輯 (使用 Promise 確保執行完成)
         await new Promise((resolve, reject) => {
             ffmpeg(originalPath)
-                .outputOptions([
-                    // 壓縮參數調整：使用 veryfast 平衡速度和品質
-                    '-c:v libx264',
-                    '-preset veryfast', 
-                    '-crf 28',          
-                    '-pix_fmt yuv420p', 
-                    '-c:a aac',
-                    '-b:a', '128k',
-                    '-movflags', 'frag_keyframe+empty_moov'
-                ])
-                .on('timeout', (err) => { 
-                    console.error('❌ FFmpeg 處理影片超時！');
-                    reject(new Error(`FFmpeg 處理影片超時！錯誤: ${err}`));
-                })
-                .on('end', () => {
-                    console.log('✅ 影片壓縮完成');
-                    resolve();
-                })
-                .on('error', (err) => {
-                    console.error('❌ FFmpeg 處理影片錯誤:', err.message);
-                    reject(new Error(`FFmpeg 處理影片失敗: ${err.message}`));
-                })
+                .outputOptions(['-c:v libx264', '-preset veryfast', '-crf 28', '-pix_fmt yuv420p', '-c:a aac', '-b:a 128k'])
+                .on('end', () => { console.log('✅ 影片壓縮完成'); resolve(); })
+                .on('error', (err) => reject(new Error(`FFmpeg 失敗: ${err.message}`)))
                 .save(outputPath);
         });
 
-        // 返回壓縮後的檔案資訊
         return { path: outputPath, mime: 'video/mp4', ext: outputExt };
-        
-    } // 影片處理結束
+    }
     
-    // =========================================================================
-    // 4. 其他檔案類型 (拋出錯誤)
-    // =========================================================================
     throw new Error(`不支援的檔案類型: ${originalMime}`);
 }
-
 
 // ----------------------------------------------------
 // 5. 新增：背景處理函數 (核心邏輯)
@@ -270,13 +265,19 @@ async function processMediaInBackground(taskId) {
         if (processedMedia.path !== file.path) {
             filesToCleanup.push(processedMedia.path);
         }
-        
+
         // 3. R2 上傳和 MongoDB 儲存邏輯 
-        const rawFileName = `${Date.now()}-${baseName.replace(path.extname(baseName), processedMedia.ext)}`; 
+        const cleanName = baseName
+            .replace(/-optimized/g, '')
+            .replace(/-converted/g, '')
+            .replace(/-compressed/g, '');
+
+        // 產生最終儲存在雲端與資料庫的乾淨檔名
+        const rawFileName = `${Date.now()}-${cleanName.replace(path.extname(cleanName), processedMedia.ext)}`; 
         const fileKey = `images/${rawFileName}`; 
-        
+
         // 讀取處理後的磁碟檔案串流
-        const fileStream = fs.createReadStream(processedMedia.path); 
+        const fileStream = fs.createReadStream(processedMedia.path);
         
         // 構造 R2 上傳參數
         const uploadParams = {
