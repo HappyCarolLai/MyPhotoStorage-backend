@@ -1,6 +1,6 @@
 // script.js (主頁面 - 相簿管理)
 
-const BACKEND_URL = 'banban-life.zeabur.app'; 
+const BACKEND_URL = 'https://banban-life.zeabur.app'; 
 
 function showMessage(type, content) {
     const messageElement = document.getElementById('message');

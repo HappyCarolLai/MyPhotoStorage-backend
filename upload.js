@@ -1,6 +1,6 @@
 // upload.js (帶有輪詢機制的後端壓縮版，使用 Canvas 截取影片靜態縮圖)
 
-const BACKEND_URL = 'banban-life.zeabur.app'; 
+const BACKEND_URL = 'https://banban-life.zeabur.app'; 
 let selectedFiles = []; 
 let activeTaskIds = []; // 追蹤所有正在處理的任務 ID
 let pollingInterval = null; // 輪詢計時器

@@ -1,6 +1,6 @@
 // album-content.js
 
-const BACKEND_URL = 'banban-life.zeabur.app'; 
+const BACKEND_URL = 'https://banban-life.zeabur.app'; 
 let currentAlbumId = null; 
 let allPhotos = []; 
 let currentPhotoIndex = 0; 
