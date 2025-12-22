@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <script src="auth-check.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上傳留影</title>
+    <link rel="icon" type="image/webp" href="images/Logo-2_32x32.webp">
+    <link rel="apple-touch-icon" href="images/Logo-2_180x180.webp">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        
+        <div id="message" class="message-box" style="display:none;"></div>
+        
+        <div class="upload-header-bar">
+            <button onclick="window.location.href='index.html'" class="icon-btn" title="返回留影簿列表">
+                <svg viewBox="0 0 24 24">
+                    <path d="M20,11V13H8L13.5,18.5L12.08,19.92L4.16,12L12.08,4.08L13.5,5.5L8,11H20Z" />
+                </svg>
+            </button>
+
+            <select id="targetAlbumSelect">
+                <option>載入中...</option>
+            </select>
+
+            <button onclick="uploadPhoto()" id="uploadButton" class="btn-primary" disabled title="開始上傳">
+                <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:white;">
+                    <path d="M9,16V10H5L12,3L19,10H15V16H9M5,20V18H19V20H5Z" />
+                </svg>
+                <span>上傳</span>
+            </button>
+        </div>
+
+        <div id="dropArea">
+            <div id="emptyState" class="empty-state-text">
+                <p style="font-size:1.1em; color:#A08878;">點擊選取照片/影片，或將檔案拖曳至此</p>
+                <p style="font-size:0.8em;">支援格式: JPG, PNG, MP4, MOV</p>
+            </div>
+            
+            <input type="file" id="photoFile" multiple accept="image/*,video/*" style="display: none;">
+            
+            <div id="previewGrid" class="preview-grid"></div>
+        </div>
+        <div id="compressionProgress" class="message-box" style="display:none; background-color: #f0f8ff; color: #31708f; border: 1px solid #b8daff; padding: 10px; margin-bottom: 20px;">
+    <strong>伺服器處理狀態:</strong>
+    <div id="progressList" style="margin-top: 5px;">
+        </div>
+</div>
+<script src="upload.js"></script>
+</body>
+</html>

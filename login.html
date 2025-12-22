@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登入 - 伴伴日常留影集</title>
+    <link rel="icon" type="image/webp" href="images/Logo-2_32x32.webp">
+    <link rel="apple-touch-icon" href="images/Logo-2_180x180.webp">
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* 登入頁面專用樣式 */
+        .login-container {
+            max-width: 400px;
+            margin: 100px auto;
+            padding: 40px;
+            background-color: #FFFFFF;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+        }
+        
+        .login-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .login-header h1 {
+            color: #555555;
+            font-weight: 300;
+            margin-bottom: 10px;
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+        
+        .login-header p {
+            color: #6C757D;
+            font-size: 0.9em;
+            margin: 0;
+        }
+        
+        .login-form {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .form-group label {
+            color: #495057;
+            font-size: 0.95em;
+            font-weight: 500;
+        }
+        
+        .form-group input {
+            padding: 12px;
+            border: 1px solid #D1D8DF;
+            border-radius: 6px;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #A08878;
+        }
+        
+        .remember-me {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+            color: #6C757D;
+        }
+        
+        .remember-me input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+        
+        .login-button {
+            background-color: #A08878;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: background-color 0.3s;
+            margin-top: 10px;
+        }
+        
+        .login-button:hover:not(:disabled) {
+            background-color: #8C7665;
+        }
+        
+        .login-button:disabled {
+            background-color: #CCCCCC;
+            cursor: not-allowed;
+        }
+        
+        .error-message {
+            background-color: #FEEEEE;
+            color: #DC3545;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.9em;
+            text-align: center;
+            display: none;
+        }
+        
+        .error-message.show {
+            display: block;
+        }
+        
+        @media (max-width: 768px) {
+            .login-container {
+                margin: 50px 20px;
+                padding: 30px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-header">
+            <h1>🔒 伴伴日常留影集</h1>
+            <p>請輸入密碼以繼續</p>
+        </div>
+        
+        <div id="errorMessage" class="error-message"></div>
+        
+        <form class="login-form" onsubmit="handleLogin(event)">
+            <div class="form-group">
+                <label for="password">密碼</label>
+                <input 
+                    type="password" 
+                    id="password" 
+                    name="password" 
+                    placeholder="輸入存取密碼"
+                    required
+                    autofocus
+                >
+            </div>
+            
+            <label class="remember-me">
+                <input type="checkbox" id="rememberMe" checked>
+                <span>30 天內記住我的登入狀態</span>
+            </label>
+            
+            <button type="submit" class="login-button" id="loginButton">
+                登入
+            </button>
+        </form>
+    </div>
+
+    <script>
+        async function handleLogin(event) {
+            event.preventDefault();
+            
+            const password = document.getElementById('password').value;
+            const rememberMe = document.getElementById('rememberMe').checked;
+            const loginButton = document.getElementById('loginButton');
+            const errorMessage = document.getElementById('errorMessage');
+            
+            // 清除之前的錯誤訊息
+            errorMessage.classList.remove('show');
+            errorMessage.textContent = '';
+            
+            // 停用按鈕，防止重複提交
+            loginButton.disabled = true;
+            loginButton.textContent = '登入中...';
+            
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        password,
+                        rememberMe 
+                    }),
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // 登入成功，跳轉到首頁
+                    const redirectTo = new URLSearchParams(window.location.search).get('redirect') || '/index.html';
+                    window.location.href = redirectTo;
+                } else {
+                    // 登入失敗，顯示錯誤訊息
+                    errorMessage.textContent = data.error || '登入失敗，請檢查密碼';
+                    errorMessage.classList.add('show');
+                    
+                    // 重新啟用按鈕
+                    loginButton.disabled = false;
+                    loginButton.textContent = '登入';
+                    
+                    // 清空密碼欄位
+                    document.getElementById('password').value = '';
+                    document.getElementById('password').focus();
+                }
+            } catch (error) {
+                console.error('登入錯誤:', error);
+                errorMessage.textContent = '連線失敗，請檢查網路連線';
+                errorMessage.classList.add('show');
+                
+                // 重新啟用按鈕
+                loginButton.disabled = false;
+                loginButton.textContent = '登入';
+            }
+        }
+        
+        // 檢查是否已經登入
+        async function checkIfAlreadyLoggedIn() {
+            try {
+                const response = await fetch('/api/auth/check');
+                if (response.ok) {
+                    // 已登入，直接跳轉
+                    const redirectTo = new URLSearchParams(window.location.search).get('redirect') || '/index.html';
+                    window.location.href = redirectTo;
+                }
+            } catch (error) {
+                // 忽略錯誤，繼續顯示登入頁面
+            }
+        }
+        
+        // 頁面載入時檢查
+        checkIfAlreadyLoggedIn();
+    </script>
+</body>
+</html>

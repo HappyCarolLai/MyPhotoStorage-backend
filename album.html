@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <script src="auth-check.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>相簿內容 - 載入中...</title>
+    <link rel="icon" type="image/webp" href="images/Logo-2_32x32.webp">
+    <link rel="apple-touch-icon" href="images/Logo-2_180x180.webp">
+    <link rel="stylesheet" href="style.css">
+    <script src="album-content.js" defer></script> 
+</head>
+<body>
+    <div class="container">
+        <button id="backToAlbums" onclick="window.close()" class="icon-btn" title="關閉分頁並返回" style="margin-bottom: 20px;">
+            <svg viewBox="0 0 24 24">
+                <path d="M20,11V13H8L13.5,18.5L12.08,19.92L4.16,12L12.08,4.08L13.5,5.5L8,11H20Z" />
+            </svg>
+        </button>
+        
+        <div id="photoView">
+            <div class="action-bar" style="display: flex; align-items: center; border-bottom: 1px solid #E9ECEF; padding-bottom: 10px; margin-bottom: 20px;">
+                <h2 id="currentAlbumName" style="border: none; margin: 0; padding: 0;">相簿內容</h2>
+                
+<div id="bulkActions" style="display: none; margin-left: auto; display: flex; align-items: center; gap: 15px;">
+    <span id="selectedCount">已選 0 張</span>
+    
+    <button onclick="toggleSelectAll()" class="btn-primary" style="background: none; border: 1px solid #E9ECEF; color: #555555; font-weight: normal; padding: 6px 12px; transition: background-color 0.3s;">
+        全選 / 取消
+    </button>
+    
+    <button onclick="bulkDeletePhotos()" class="btn-primary" style="background-color: #8e1925; /* 使用紅色背景 */">
+        批量刪除
+    </button>
+    
+    <button onclick="showMovePhotoModal(true)" class="btn-primary">
+        批量移動
+    </button>
+</div>
+            </div>
+            
+            <div id="photoGrid" class="photo-grid"> 
+                <p id="noPhotosMessage" style="margin-top: 30px; display: none; text-align: center; color: #888;">此相簿目前沒有照片。</p>
+            </div>
+        </div>
+        
+        <div id="message" class="message-box success" style="display: none;"></div>
+
+<div id="movePhotoModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="document.getElementById('movePhotoModal').style.display='none'">&times;</span>
+        <h3>移動留影</h3>
+        <p id="movePhotoMessage">將 <span id="photoToMoveName" style="font-weight: bold;"></span> 移動到：</p>
+        
+        <select id="targetMoveAlbumSelect" style="width: 100%; margin: 15px 0; padding: 12px; border-radius: 8px; border: 1px solid #D1D8DF; font-size: 1.1rem; color: #333;">
+        </select>
+        
+        <div class="modal-actions" style="margin-top: 20px; text-align: right; width: 100%;">
+            <button class="icon-btn" onclick="document.getElementById('movePhotoModal').style.display='none'" style="font-size: 1rem; margin-right: 15px;">取消</button>
+            <button id="confirmMovePhoto" class="btn-primary">確認移動</button>
+        </div>
+    </div>
+</div>
+
+<div id="renamePhotoModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="document.getElementById('renamePhotoModal').style.display='none'">&times;</span>
+        <h3>重新命名照片</h3>
+        
+        <span id="currentPhotoNameDisplay" style="display: none;"></span>
+        
+        <input type="hidden" id="renamePhotoId">
+        <label for="newPhotoNameInput" style="display: block; margin-bottom: 8px;">請輸入新檔名 (不含副檔名):</label>
+        
+        <input type="text" id="newPhotoNameInput" style="width: 100%; margin: 10px 0; padding: 12px 10px; border-radius: 8px; border: 1px solid #ccc; font-size: 1.1rem; box-sizing: border-box;">
+        
+        <div class="modal-actions" style="margin-top: 20px; text-align: right;">
+            <button class="icon-btn" onclick="document.getElementById('renamePhotoModal').style.display='none'" style="font-size: 1rem; margin-right: 10px;">取消</button>
+            <button id="confirmRenamePhoto" onclick="executeRenamePhoto()" class="btn-primary">確認命名</button>
+        </div>
+    </div>
+</div>
+        
+        <div id="lightbox" class="modal" style="display: none;">
+            <span class="close" onclick="closeLightbox()">&times;</span>
+            
+            <div id="imageCaption" class="caption" style="position: absolute; bottom: 20px; left: 0; width: 100%; text-align: center; color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); pointer-events: none;"></div> 
+            
+            <div class="lightbox-content-wrapper">
+                <button id="prevBtn" class="nav-btn prev" onclick="navigatePhoto(-1)">&#10094;</button>
+                <button id="nextBtn" class="nav-btn next" onclick="navigatePhoto(1)">&#10095;</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

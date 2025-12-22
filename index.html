@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <script src="auth-check.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>伴伴日常留影集</title>
+    <link rel="icon" type="image/webp" href="images/Logo-2_32x32.webp">
+    <link rel="apple-touch-icon" href="images/Logo-2_180x180.webp">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>伴伴日常留影集</h1>
+
+        <div id="message" class="message-box" style="display:none;"></div>
+
+        <div class="album-section">
+            <div id="albumListWrapper" class="album-list-wrapper">
+                <div id="albumList" class="album-grid">
+                    </div>
+            </div>
+            
+            <div class="main-actions-bar">
+    <button onclick="document.getElementById('addAlbumModal').style.display='block'" class="btn-primary">
+        新增留影簿
+    </button>
+    <button onclick="window.location.href='upload.html'" class="btn-primary">
+        上傳新留影
+    </button>
+</div>
+        </div>
+    </div>
+
+    <div id="addAlbumModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="document.getElementById('addAlbumModal').style.display='none'">&times;</span>
+        <h3>建立新的留影簿</h3>
+        <label for="newAlbumName">留影簿名稱:</label>
+        <input type="text" id="newAlbumName" placeholder="例如：2024年生活日常"> <button onclick="addNewAlbum()" class="btn-primary">確認建立</button> </div>
+</div>
+
+<div id="renameAlbumModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="document.getElementById('renameAlbumModal').style.display='none'">&times;</span>
+        <h3>重新命名留影簿</h3>
+        <label for="newRenameAlbumName">新名稱:</label>
+        <input type="text" id="newRenameAlbumName"> <input type="hidden" id="renameAlbumId">
+        <button onclick="renameAlbum()" class="btn-primary">確認更名</button> </div>
+</div>
+
+    <script src="script.js"></script>
+</body>
+</html>
