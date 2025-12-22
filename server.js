@@ -1,20 +1,14 @@
 // MyPhotoStorage-backend/server.js - 批次相簿管理核心 (MongoDB & Cloudflare R2 整合)
-const mongoose = require('mongoose'); 
-// 新增: 引入 path, os 和 fs
+const mongoose = require('mongoose'); 
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const express = require('express');
+const session = require('express-session'); // ⭐ 新增
 const multer = require('multer');
 const cors = require('cors'); 
-// 引入 AWS S3 Client
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-// 新增: 引入 fluent-ffmpeg
-const ffmpeg = require('fluent-ffmpeg'); // ⭐ 關鍵修正 1：啟用 FFmpeg
-// 引入 node:stream (用於將 ffmpeg 輸出導向 R2)
-// const { PassThrough } = require('node:stream');
-
-// 引入 sharp 和 heic-convert 
+const ffmpeg = require('fluent-ffmpeg');
 const sharp = require('sharp'); 
 const heicConvert = require('heic-convert'); 
 
@@ -25,28 +19,131 @@ app.use(express.json());
 // ⭐ 全域變數：追蹤所有背景處理任務
 const mediaTasks = {}; 
 
-// 設定靜態檔案服務
+// ============================================================
+// ⭐ 新增：Session 與密碼認證設定
+// ============================================================
+
+const PHOTO_PASSWORD = process.env.PHOTO_PASSWORD;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+
+// 檢查必要的認證環境變數
+if (!PHOTO_PASSWORD || !SESSION_SECRET) {
+    console.error("❌ 錯誤：缺少 PHOTO_PASSWORD 或 SESSION_SECRET 環境變數");
+    process.exit(1);
+}
+
+// 設定 Session 中介層
+app.use(session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: process.env.NODE_ENV === 'production', // 生產環境使用 HTTPS
+        httpOnly: true, // 防止 XSS 攻擊
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 天（毫秒）
+        sameSite: 'lax' // 防止 CSRF 攻擊
+    }
+}));
+
+// 認證中介層函數
+function requireAuth(req, res, next) {
+    if (req.session && req.session.authenticated) {
+        return next();
+    }
+    
+    // 如果是 API 請求，回傳 401
+    if (req.path.startsWith('/api/')) {
+        return res.status(401).json({ error: '未授權，請先登入' });
+    }
+    
+    // 如果是頁面請求，重導向到登入頁
+    res.redirect(`/login.html?redirect=${encodeURIComponent(req.path)}`);
+}
+
+// ⭐ 認證 API 路由
+// [POST] 登入
+app.post('/api/auth/login', (req, res) => {
+    const { password, rememberMe } = req.body;
+    
+    if (password === PHOTO_PASSWORD) {
+        req.session.authenticated = true;
+        
+        // 如果選擇「記住我」，延長 cookie 有效期為 30 天，否則僅此次瀏覽期間有效
+        if (rememberMe) {
+            req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 天
+        } else {
+            req.session.cookie.expires = false; // 關閉瀏覽器後失效
+        }
+        
+        return res.json({ success: true, message: '登入成功' });
+    } else {
+        return res.status(401).json({ error: '密碼錯誤' });
+    }
+});
+
+// [GET] 檢查登入狀態
+app.get('/api/auth/check', (req, res) => {
+    if (req.session && req.session.authenticated) {
+        return res.json({ authenticated: true });
+    }
+    return res.status(401).json({ authenticated: false });
+});
+
+// [POST] 登出
+app.post('/api/auth/logout', (req, res) => {
+    req.session.destroy((err) => {
+        if (err) {
+            return res.status(500).json({ error: '登出失敗' });
+        }
+        res.clearCookie('connect.sid');
+        return res.json({ success: true, message: '已登出' });
+    });
+});
+
+// ============================================================
+// ⭐ 靜態檔案服務（需套用認證，但排除登入頁面）
+// ============================================================
+
+// 允許未登入存取的路徑
+const publicPaths = [
+    '/login.html',
+    '/style.css',
+    '/images/'
+];
+
+// 靜態檔案中介層（附加認證檢查）
+app.use((req, res, next) => {
+    // 檢查是否為公開路徑
+    const isPublicPath = publicPaths.some(path => req.path.startsWith(path));
+    
+    if (isPublicPath) {
+        return next();
+    }
+    
+    // 其他靜態檔案需要認證
+    requireAuth(req, res, next);
+});
+
 app.use(express.static(path.join(__dirname, '')));
 
-// 修正點 1: 使用 diskStorage 將檔案暫存到磁碟，避免記憶體溢出 (OOM)
+// ============================================================
+// 原有的 Multer、R2、MongoDB 設定（完全保留）
+// ============================================================
+
 const upload = multer({ 
     storage: multer.diskStorage({
         destination: function (req, file, cb) {
-            // 使用作業系統的暫存目錄
             cb(null, os.tmpdir()); 
         },
         filename: function (req, file, cb) {
-            // 生成唯一的暫存檔名
             cb(null, `${Date.now()}-${file.originalname.substring(0, 30)}`);
         }
     }),
     limits: {
-        // 設定檔案大小上限為 500MB (可依需求調整)
         fileSize: 500 * 1024 * 1024 // 500MB
     }
 }); 
 
-// 取得環境變數 - Cloudflare R2 專用
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const R2_API_ENDPOINT = process.env.R2_API_ENDPOINT;
@@ -54,19 +151,13 @@ const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
 const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
 const MONGODB_URL = process.env.MONGODB_URL; 
 
-// 檢查所有 R2 變數
 if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_API_ENDPOINT || !R2_PUBLIC_URL || !R2_BUCKET_NAME || !MONGODB_URL) {
     console.error("❌ 錯誤：必要的環境變數缺失 (R2 或 MongoDB)");
     process.exit(1); 
 }
 
-// ----------------------------------------------------
-// 1. 輔助函式 (Cloudflare R2 相關)
-// ----------------------------------------------------
-
-// 實例化 S3 Client (用於連線 R2)
 const s3Client = new S3Client({
-    region: 'auto', // R2 建議使用 'auto'
+    region: 'auto',
     endpoint: R2_API_ENDPOINT,
     credentials: {
         accessKeyId: R2_ACCESS_KEY_ID,
@@ -74,36 +165,18 @@ const s3Client = new S3Client({
     }
 });
 
-/**
- * 從 R2 刪除單個檔案
- */
 async function deleteFileFromR2(storageFileName) {
     const params = {
         Bucket: R2_BUCKET_NAME,
         Key: `images/${storageFileName}`, 
     };
-    
     await s3Client.send(new DeleteObjectCommand(params));
 }
 
-// ----------------------------------------------------
-// 2. FFmpeg 額外設定 (假設 install-ffmpeg.sh 已完成安裝)
-// ----------------------------------------------------
-// 保持註釋，假設 FFmpeg 已在 PATH 中
-// ffmpeg.setFfmpegPath('/usr/bin/ffmpeg'); 
-// ffmpeg.setFfprobePath('/usr/bin/ffprobe');
-
-
-// ----------------------------------------------------
-// 3. MongoDB 連線與資料模型 (Schema) 定義
-// ----------------------------------------------------
-
-// 連線到 MongoDB
 mongoose.connect(MONGODB_URL)
     .then(() => console.log('✅ MongoDB 連線成功'))
     .catch(err => console.error('❌ MongoDB 連線失敗:', err));
 
-// 定義照片資料模型
 const PhotoSchema = new mongoose.Schema({
     originalFileName: { type: String, required: true }, 
     storageFileName: { type: String, required: true, unique: true }, 
@@ -112,7 +185,6 @@ const PhotoSchema = new mongoose.Schema({
     uploadedAt: { type: Date, default: Date.now } 
 });
 
-// 定義相簿資料模型
 const AlbumSchema = new mongoose.Schema({
     name: { type: String, required: true, trim: true, unique: true }, 
     coverUrl: { type: String, default: '' }, 
@@ -123,24 +195,12 @@ const AlbumSchema = new mongoose.Schema({
 const Photo = mongoose.model('Photo', PhotoSchema);
 const Album = mongoose.model('Album', AlbumSchema);
 
-
-// ----------------------------------------------------
-// 4. 輔助函式 - 媒體處理 (使用 sharp/heic-convert 和 FFmpeg)
-// ----------------------------------------------------
-/**
- * 使用 FFmpeg 或 sharp 處理媒體檔案 (壓縮影片/壓縮圖片/轉換 HEIC)
- */
 async function processMedia(file) {
     const originalPath = file.path;
     const originalMime = file.mimetype;
     const originalExt = path.extname(file.originalname).toLowerCase();
-    
-    // ⭐ 修正中文檔名亂碼 (用於日誌顯示)
     const logName = Buffer.from(file.originalname, 'latin1').toString('utf8');
 
-    // =========================================================================
-    // 1. 標準圖片格式 (JPG, PNG, WEBP) -> ⭐ 加入 Sharp 壓縮邏輯
-    // =========================================================================
     if (
         originalMime === 'image/jpeg' || 
         originalMime === 'image/png' || 
@@ -150,22 +210,22 @@ async function processMedia(file) {
         originalExt === '.png' ||
         originalExt === '.webp' 
     ) {
-        const outputExt = '.jpg'; // 統一轉為 jpg 壓縮率最高
+        const outputExt = '.jpg';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-optimized${outputExt}`);
         
         console.log(`🖼️ 偵測到圖片: ${logName}，開始進行尺寸與品質優化...`);
 
         try {
             await sharp(originalPath)
-                .rotate() // 自動修正手機拍攝方向
+                .rotate()
                 .resize({
                     width: 2000, 
                     height: 2000, 
                     fit: 'inside', 
-                    withoutEnlargement: true // 小圖不放大
+                    withoutEnlargement: true
                 })
                 .jpeg({ 
-                    quality: 80, // 品質設為 80，檔案體積會大幅縮小
+                    quality: 80,
                     mozjpeg: true 
                 })
                 .toFile(outputPath);
@@ -178,9 +238,6 @@ async function processMedia(file) {
         }
     }
     
-    // =========================================================================
-    // 2. HEIC 格式 (轉換到 JPEG) -> 保持不變
-    // =========================================================================
     else if (
         originalMime === 'image/heic' || 
         originalMime === 'image/heif' || 
@@ -196,11 +253,10 @@ async function processMedia(file) {
             const jpegBuffer = await heicConvert({
                 buffer: inputBuffer,
                 format: 'JPEG', 
-                quality: 0.8 // 轉換時也調低品質
+                quality: 0.8
             });
             fs.writeFileSync(outputPath, jpegBuffer);
             
-            // 可選：再過一次 sharp 確保方向與尺寸 (HEIC 轉出的 JPEG 有時還是很大)
             const finalPath = outputPath + "-opt.jpg";
             await sharp(outputPath).rotate().resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true }).toFile(finalPath);
             
@@ -212,9 +268,6 @@ async function processMedia(file) {
         }
     }
     
-    // =========================================================================
-    // 3. 影片檔案 (FFmpeg 壓縮) -> 保持不變
-    // =========================================================================
     else if (originalMime.startsWith('video/') || originalExt === '.mov' || originalExt === '.mp4') {
         const outputExt = '.mp4';
         const outputPath = path.join(os.tmpdir(), `${path.basename(originalPath)}-compressed${outputExt}`);
@@ -234,16 +287,11 @@ async function processMedia(file) {
     throw new Error(`不支援的檔案類型: ${originalMime}`);
 }
 
-// ----------------------------------------------------
-// 5. 新增：背景處理函數 (核心邏輯)
-// ----------------------------------------------------
 async function processMediaInBackground(taskId) {
     const task = mediaTasks[taskId];
     if (!task) return; 
 
     const { file, targetAlbum } = task;
-
-    // ⭐ 修正中文檔名亂碼：使用 Buffer 處理
     const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
     const baseName = originalnameFixed.replace(/[^a-z0-9\u4e00-\u9fa5\.\-]/gi, '_');
 
@@ -255,31 +303,25 @@ async function processMediaInBackground(taskId) {
     let processedMedia; 
 
     try {
-        // 1. 媒體處理 (包含 HEIC 轉換或 FFmpeg 壓縮)
         processedMedia = await processMedia(file); 
         
         task.message = '媒體處理完成，開始上傳 R2 雲端儲存...';
-        console.log(`[TASK ${taskId}] 媒體處理完成，開始上傳 R2...`); // 新增日誌
+        console.log(`[TASK ${taskId}] 媒體處理完成，開始上傳 R2...`);
 
-        // 2. 判斷是否產生了新的暫存檔
         if (processedMedia.path !== file.path) {
             filesToCleanup.push(processedMedia.path);
         }
 
-        // 3. R2 上傳和 MongoDB 儲存邏輯 
         const cleanName = baseName
             .replace(/-optimized/g, '')
             .replace(/-converted/g, '')
             .replace(/-compressed/g, '');
 
-        // 產生最終儲存在雲端與資料庫的乾淨檔名
         const rawFileName = `${Date.now()}-${cleanName.replace(path.extname(cleanName), processedMedia.ext)}`; 
         const fileKey = `images/${rawFileName}`; 
 
-        // 讀取處理後的磁碟檔案串流
         const fileStream = fs.createReadStream(processedMedia.path);
         
-        // 構造 R2 上傳參數
         const uploadParams = {
             Bucket: R2_BUCKET_NAME,
             Key: fileKey,
@@ -289,14 +331,12 @@ async function processMediaInBackground(taskId) {
             CacheControl: 'public, max-age=31536000, immutable' 
         };
         
-        // 執行 R2 上傳
         await s3Client.send(new PutObjectCommand(uploadParams));
         
-        // 構造 R2 公開 URL & 儲存 MongoDB 紀錄
         const r2PublicUrl = `${R2_PUBLIC_URL}/${fileKey}`; 
         
         task.message = 'R2 上傳完成，寫入資料庫...';
-        console.log(`[TASK ${taskId}] R2 上傳完成，寫入資料庫...`); // 新增日誌
+        console.log(`[TASK ${taskId}] R2 上傳完成，寫入資料庫...`);
 
         const newPhoto = new Photo({
             originalFileName: originalnameFixed,
@@ -306,23 +346,19 @@ async function processMediaInBackground(taskId) {
         });
         await newPhoto.save();
         
-        // 4. 更新相簿計數
         await Album.findByIdAndUpdate(targetAlbum._id, { $inc: { photoCount: 1 } });
         
-        // 5. 標記任務完成
         task.status = 'COMPLETED';
         task.message = `✅ 處理成功！耗時: ${((Date.now() - task.startTime) / 1000).toFixed(1)} 秒`;
         task.resultUrl = r2PublicUrl;
         console.log(`[TASK ${taskId}] 完成: ${originalnameFixed}`);
 
     } catch (error) {
-        // 錯誤處理
         const errorMessage = error.message;
         task.status = 'FAILED';
         task.message = `❌ 處理失敗: ${errorMessage}`;
         console.error(`[TASK ${taskId}] 處理失敗: ${originalnameFixed} 錯誤:`, errorMessage);
     } finally {
-        // 關鍵清理步驟：刪除所有臨時檔案
         for (const p of filesToCleanup) {
              try {
                 if (fs.existsSync(p)) {
@@ -332,24 +368,23 @@ async function processMediaInBackground(taskId) {
                 console.error(`[TASK ${taskId}] 刪除暫存檔 ${p} 失敗:`, cleanupError.message);
             }
         }
-        // 清理任務物件 (10 分鐘後刪除，避免記憶體佔用)
-        setTimeout(() => delete mediaTasks[taskId], 600000); // 10 分鐘後刪除
+        setTimeout(() => delete mediaTasks[taskId], 600000);
     }
 }
 
+// ============================================================
+// ⭐ API 路由 - 所有需要認證（除了 /api/auth/* 之外）
+// ============================================================
 
-// ----------------------------------------------------
-// 6. API 路由 - 相簿管理 (Albums)
-// ----------------------------------------------------
-// 健康檢查 API
 app.get('/', (req, res) => {
     res.status(200).json({ 
         status: 'ok', 
         message: 'MyPhotoStorage Backend Service is running and ready for API requests.'
     });
 });
-// [GET] 取得所有相簿列表
-app.get('/api/albums', async (req, res) => {
+
+// ⭐ 以下所有 API 路由都需要認證
+app.get('/api/albums', requireAuth, async (req, res) => {
     try {
         let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
         if (!defaultAlbum) {
@@ -365,8 +400,7 @@ app.get('/api/albums', async (req, res) => {
     }
 });
 
-// [POST] 新增相簿
-app.post('/api/albums', async (req, res) => {
+app.post('/api/albums', requireAuth, async (req, res) => {
     try {
         const { name } = req.body;
         if (!name) {
@@ -387,8 +421,7 @@ app.post('/api/albums', async (req, res) => {
     }
 });
 
-// [PUT] 修改相簿名稱或封面
-app.put('/api/albums/:id', async (req, res) => {
+app.put('/api/albums/:id', requireAuth, async (req, res) => {
     try {
         const { name, coverUrl } = req.body;
         if (!name) {
@@ -416,8 +449,7 @@ app.put('/api/albums/:id', async (req, res) => {
     }
 });
 
-// [DELETE] 刪除相簿 (將照片轉移到 '未分類相簿')
-app.delete('/api/albums/:id', async (req, res) => {
+app.delete('/api/albums/:id', requireAuth, async (req, res) => {
     try {
         const albumId = req.params.id;
         
@@ -435,18 +467,15 @@ app.delete('/api/albums/:id', async (req, res) => {
             return res.status(500).json({ error: '系統錯誤：找不到預設相簿' });
         }
 
-        // 1. 將該相簿下的所有照片轉移到 '未分類相簿'
         const updateResult = await Photo.updateMany(
             { albumId: albumId }, 
             { $set: { albumId: defaultAlbum._id } } 
         );
         
-        // 2. 更新預設相簿的照片計數
         if (updateResult.modifiedCount > 0) {
             await Album.findByIdAndUpdate(defaultAlbum._id, { $inc: { photoCount: updateResult.modifiedCount } });
         }
 
-        // 3. 刪除相簿本身
         await Album.findByIdAndDelete(albumId);
 
         res.json({ 
@@ -459,16 +488,9 @@ app.delete('/api/albums/:id', async (req, res) => {
     }
 });
 
-
-// ----------------------------------------------------
-// 7. API 路由 - 照片管理 (Photos)
-// ----------------------------------------------------
-
-// [GET] 取得特定相簿裡的所有照片
-app.get('/api/albums/:id/photos', async (req, res) => {
+app.get('/api/albums/:id/photos', requireAuth, async (req, res) => {
     try {
         const albumId = req.params.id;
-        // 確保相簿存在
         if (!(await Album.findById(albumId))) {
              return res.status(404).json({ error: '找不到該相簿' });
         }
@@ -480,8 +502,7 @@ app.get('/api/albums/:id/photos', async (req, res) => {
     }
 });
 
-// [PUT] 修改特定照片的名稱 (此功能在前端新分頁中未實作，但保留後端 API)
-app.put('/api/photos/:id', async (req, res) => {
+app.put('/api/photos/:id', requireAuth, async (req, res) => {
     try {
         const { originalFileName } = req.body;
         if (!originalFileName) {
@@ -505,8 +526,7 @@ app.put('/api/photos/:id', async (req, res) => {
     }
 });
 
-// [PATCH] 移動特定照片到其他相簿 (單張照片移動)
-app.patch('/api/photos/:id/move', async (req, res) => {
+app.patch('/api/photos/:id/move', requireAuth, async (req, res) => {
     try {
         const { targetAlbumId } = req.body;
         const photoId = req.params.id;
@@ -534,7 +554,6 @@ app.patch('/api/photos/:id/move', async (req, res) => {
         photo.albumId = targetAlbumId;
         await photo.save();
 
-        // 更新新舊相簿的照片計數
         await Album.findByIdAndUpdate(oldAlbumId, { $inc: { photoCount: -1 } }); 
         await Album.findByIdAndUpdate(targetAlbumId, { $inc: { photoCount: 1 } }); 
 
@@ -546,21 +565,16 @@ app.patch('/api/photos/:id/move', async (req, res) => {
     }
 });
 
-// [DELETE] 刪除單張照片
-app.delete('/api/photos/:id', async (req, res) => {
+app.delete('/api/photos/:id', requireAuth, async (req, res) => {
     try {
         const photo = await Photo.findById(req.params.id);
         if (!photo) {
             return res.status(404).json({ error: '找不到該照片' });
         }
         
-        // 1. 從 R2 刪除檔案 (使用輔助函式)
         await deleteFileFromR2(photo.storageFileName); 
-        
-        // 2. 從 MongoDB 刪除記錄
         await Photo.findByIdAndDelete(req.params.id);
         
-        // 3. 更新相簿計數
         if (photo.albumId) {
             await Album.findByIdAndUpdate(photo.albumId, { $inc: { photoCount: -1 } });
         }
@@ -574,15 +588,7 @@ app.delete('/api/photos/:id', async (req, res) => {
     }
 });
 
-
-// ----------------------------------------------------
-// 8. API 路由 - 批量照片操作
-// ----------------------------------------------------
-
-/**
- * [POST] 批量刪除照片
- */
-app.post('/api/photos/bulkDelete', async (req, res) => {
+app.post('/api/photos/bulkDelete', requireAuth, async (req, res) => {
     const { photoIds } = req.body;
     if (!photoIds || !Array.isArray(photoIds) || photoIds.length === 0) {
         return res.status(400).json({ error: '請提供有效的照片 ID 列表進行批量刪除。' });
@@ -591,19 +597,13 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     const successes = [];
     const failures = [];
     
-    // 找出所有需要刪除的照片
     const photos = await Photo.find({ _id: { $in: photoIds } }).exec();
     
-    // 使用 for...of 迴圈確保循序執行
     for (const photo of photos) {
         try {
-            // 1. 執行 R2 刪除
             await deleteFileFromR2(photo.storageFileName); 
-
-            // 2. 刪除資料庫紀錄
             await Photo.deleteOne({ _id: photo._id });
             
-            // 3. 更新所屬相簿的照片數量
             if (photo.albumId) {
                 await Album.findByIdAndUpdate(photo.albumId, { $inc: { photoCount: -1 } });
             }
@@ -634,18 +634,13 @@ app.post('/api/photos/bulkDelete', async (req, res) => {
     });
 });
 
-
-/**
- * [POST] 批量移動照片
- */
-app.post('/api/photos/bulkMove', async (req, res) => {
+app.post('/api/photos/bulkMove', requireAuth, async (req, res) => {
     const { photoIds, targetAlbumId } = req.body;
 
     if (!photoIds || !Array.isArray(photoIds) || photoIds.length === 0 || !targetAlbumId) {
         return res.status(400).json({ error: '請提供有效的照片 ID 列表和目標相簿 ID。' });
     }
 
-    // 檢查目標相簿是否存在
     const targetAlbum = await Album.findById(targetAlbumId);
     if (!targetAlbum) {
         return res.status(404).json({ error: '找不到目標相簿。' });
@@ -655,24 +650,20 @@ app.post('/api/photos/bulkMove', async (req, res) => {
     const failures = [];
     
     try {
-        // 1. 找出所有待移動照片的舊相簿 ID 
         const photos = await Photo.find({ _id: { $in: photoIds } }).select('albumId');
         if (photos.length === 0) {
             return res.status(404).json({ error: '找不到任何指定的照片。' });
         }
         
-        // 2. 建立舊相簿計數變更地圖
         const oldAlbumUpdates = new Map();
         photos.forEach(photo => {
             const oldId = photo.albumId ? photo.albumId.toString() : 'null'; 
             
-            // 避免將照片從 A 移動到 A
             if (oldId !== targetAlbumId.toString()) { 
                  oldAlbumUpdates.set(oldId, (oldAlbumUpdates.get(oldId) || 0) + 1);
             }
         });
 
-        // 3. 在資料庫中執行批量更新操作 
         const updateResult = await Photo.updateMany(
             { _id: { $in: photoIds }, albumId: { $ne: targetAlbumId } }, 
             { $set: { albumId: targetAlbumId } }
@@ -681,7 +672,6 @@ app.post('/api/photos/bulkMove', async (req, res) => {
         const actualMovedCount = updateResult.modifiedCount;
 
         if (updateResult.acknowledged) {
-            // 4. 更新舊相簿的 photoCount 
             const decrementPromises = [];
             for (const [oldAlbumId, count] of oldAlbumUpdates.entries()) {
                 if (oldAlbumId !== targetAlbumId.toString()) { 
@@ -692,7 +682,6 @@ app.post('/api/photos/bulkMove', async (req, res) => {
             }
             await Promise.allSettled(decrementPromises);
 
-            // 5. 更新新相簿的 photoCount 
             if (actualMovedCount > 0) {
                  await Album.findByIdAndUpdate(targetAlbumId, { $inc: { photoCount: actualMovedCount } });
             }
@@ -715,41 +704,25 @@ app.post('/api/photos/bulkMove', async (req, res) => {
     });
 });
 
-
-// ----------------------------------------------------
-// 9. API 路由 - 任務狀態追蹤 (New API)
-// ----------------------------------------------------
-
-// [GET] 取得特定任務的狀態
-app.get('/api/tasks/status/:taskId', (req, res) => {
+app.get('/api/tasks/status/:taskId', requireAuth, (req, res) => {
     const taskId = req.params.taskId;
     const task = mediaTasks[taskId];
 
     if (!task) {
-        // 如果任務在伺服器端已經被清理（超過 10 分鐘），則回傳 404
         return res.status(404).json({ error: '找不到該任務ID，可能已過期或完成。' });
     }
     
-    // 限制傳輸的資訊
     const { status, message, resultUrl, originalFileName } = task;
-
     res.json({ status, message, resultUrl, originalFileName });
 });
 
-
-// ----------------------------------------------------
-// 10. API 路由 - 檔案上傳 (新的非同步提交 API)
-// ----------------------------------------------------
-
-// 檔案上傳 API (僅處理接收檔案，並啟動背景任務)
-app.post('/api/tasks/submit-upload', upload.array('photos'), async (req, res) => {
+app.post('/api/tasks/submit-upload', requireAuth, upload.array('photos'), async (req, res) => {
     if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: '沒有收到照片檔案' });
     }
 
     const { targetAlbumId } = req.body; 
 
-    // 確保 targetAlbum 存在，並定義 defaultAlbum
     let defaultAlbum = await Album.findOne({ name: '未分類相簿' });
     if (!defaultAlbum) {
         defaultAlbum = new Album({ name: '未分類相簿' });
@@ -763,39 +736,29 @@ app.post('/api/tasks/submit-upload', upload.array('photos'), async (req, res) =>
         }
     }
     
-    // 立即回傳所有任務 ID
     const taskIds = [];
     
     for (const file of req.files) {
-        
-        // 修正中文檔名亂碼問題 (用於紀錄和追蹤)
         const originalnameFixed = Buffer.from(file.originalname, 'latin1').toString('utf8');
-
-        // 1. 創建唯一的 Task ID
         const taskId = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`; 
 
-        // 2. 初始化任務狀態 (儲存在記憶體中)
         mediaTasks[taskId] = {
             status: 'PENDING',
             message: '等待伺服器資源進行媒體處理...',
             originalFileName: originalnameFixed, 
             targetAlbum: targetAlbum,
-            file: file, // 儲存 multer 檔案物件
+            file: file,
             startTime: Date.now()
         };
         taskIds.push(taskId);
-
-        // 3. ⭐ 在背景啟動處理函數 (不等待 Promise)
         processMediaInBackground(taskId); 
     }
 
-    // 立即回應前端，讓前端開始輪詢
     return res.json({ 
         message: '檔案已提交，正在背景處理中。',
         taskIds: taskIds
     });
 });
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
